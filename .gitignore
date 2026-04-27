@@ -1,0 +1,34 @@
+# Build outputs
+bin/
+obj/
+*.dll
+*.pdb
+*.user
+
+# NuGet
+*.nupkg
+.nuget/
+packages/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Rider
+.idea/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MIDI output (regénéré à chaque run)
+poc/PocAccompaniment/output/
+
+# Test artifacts
+*.tmp
