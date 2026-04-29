@@ -143,7 +143,12 @@ public partial class SettingsViewModel : ViewModelBase
             foreach (var drv in AudioEngine.GetAsioDrivers())
                 AsioDrivers.Add(drv);
         }
-        catch { /* ASIO pas disponible sur tous les systèmes */ }
+        catch (PlatformNotSupportedException)
+        { /* ASIO pas disponible sur tous les systèmes (Linux, etc.) */ }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Impossible de lister les drivers ASIO : {ex.Message}";
+        }
 
         if (SelectedAsioDriver == null && AsioDrivers.Count > 0)
             SelectedAsioDriver = AsioDrivers[0];

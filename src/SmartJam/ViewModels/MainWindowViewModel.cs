@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -166,10 +167,8 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         var window     = new SettingsWindow { DataContext = settingsVm };
 
         // Récupère la fenêtre principale comme owner pour centrer la modale
-        var mainWin = Avalonia.Application.Current?
-            .ApplicationLifetime is Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime lifetime
-            ? lifetime.MainWindow
-            : null;
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;
+        var mainWin  = lifetime?.MainWindow;
 
         if (mainWin != null)
             await window.ShowDialog(mainWin);
