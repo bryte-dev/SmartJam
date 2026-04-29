@@ -1,9 +1,7 @@
 # SmartJam 🎸
 
-Application de **détection de pitch** et **génération d'accompagnement musical**, développée dans le cadre du TPI.
-
-> **Mode offline** : tous les POC fonctionnent **sans micro, sans carte son, sans installation musicale**.  
-> On utilise soit un **sinus généré** soit un **fichier WAV** pour tester.
+Application de **détection de pitch en temps réel** développée dans le cadre du TPI.  
+Elle capture l'audio (interface ASIO / WASAPI) ou génère un sinus interne, détecte la note jouée et affiche les résultats dans une interface Avalonia.
 
 ---
 
@@ -11,49 +9,46 @@ Application de **détection de pitch** et **génération d'accompagnement musica
 
 ```
 SmartJam/
-├── SmartJam.slnx                  # Solution .NET (ouvrir dans VS/Rider)
+├── SmartJam.slnx                    # Solution .NET (ouvrir dans VS / Rider)
 │
 ├── poc/
-│   ├── PocPitch/                  # POC : détection de pitch (NWaves YIN)
-│   │   ├── PitchAnalyser.cs       # Algorithme YIN + conversion Hz→note
-│   │   ├── SineGenerator.cs       # Génère un sinus de test
-│   │   ├── WavReader.cs           # Lit un fichier WAV PCM 16 bits
-│   │   └── README.md              # Guide du POC
-│   │
-│   └── PocAccompaniment/          # POC : progression d'accords + export MIDI
-│       ├── AccompanimentGenerator.cs  # Génère des accords (règles musicales)
-│       ├── MidiExporter.cs        # Exporte vers .mid (DryWetMIDI)
-│       └── README.md              # Guide du POC
+│   ├── PocPitch/                    # POC offline : détection YIN sur sinus ou WAV
+│   └── PocAccompaniment/            # POC : progression d'accords + export MIDI
 │
 ├── src/
-│   └── SmartJam/                  # Application principale Avalonia MVVM
+│   └── SmartJam/                    # Application principale Avalonia MVVM
+│       ├── Audio/
+│       │   ├── AudioEngine.cs       # Moteur audio (WASAPI / ASIO) — adapté d'AudioBlocks
+│       │   └── SineWaveProvider.cs  # Oscillateur sinus (ISampleProvider NAudio)
 │       ├── Services/
-│       │   ├── PitchDetectorService.cs      # Service pitch (YIN)
-│       │   ├── AccompanimentGeneratorService.cs  # Service génération
-│       │   └── SineAudioSource.cs          # Source audio offline
+│       │   ├── PitchDetectorService.cs         # Détection YIN (NWaves)
+│       │   ├── AccompanimentGeneratorService.cs # Génération d'accords (placeholder)
+│       │   └── SineAudioSource.cs              # Source offline (offline uniquement)
 │       ├── ViewModels/
-│       │   └── MainWindowViewModel.cs      # ViewModel principal (MVVM)
+│       │   └── MainWindowViewModel.cs  # ViewModel principal (MVVM)
 │       └── Views/
-│           └── MainWindow.axaml            # Interface Avalonia
+│           └── MainWindow.axaml        # Interface Avalonia
 │
 ├── assets/
 │   └── wav/
-│       ├── A4_440Hz_3s.wav         # Fichier WAV de test (La4, 440 Hz, 3s)
-│       └── generate_test_wav.py    # Script pour regénérer le WAV
+│       ├── A4_440Hz_3s.wav          # Fichier WAV de test (440 Hz, 3 s)
+│       └── generate_test_wav.py     # Script pour regénérer le WAV
 │
 └── docs/
     └── tpi/
-        ├── B5_processus_metier.md  # Template processus métiers (B5)
-        ├── G9_concept_realisation.md  # Architecture technique (G9)
-        └── G12_tests.md            # Cas de test (G12)
+        ├── B5_processus_metier.md
+        ├── G9_concept_realisation.md
+        └── G12_tests.md
 ```
 
 ---
 
 ## Prérequis
 
-- [.NET 8.0+ SDK](https://dotnet.microsoft.com/download) — vérifier : `dotnet --version`
-- Optionnel : Visual Studio 2022 / JetBrains Rider / VS Code + C# extension
+- [.NET 10 SDK](https://dotnet.microsoft.com/download) — vérifier : `dotnet --version`
+- Windows 10 / 11 (NAudio WASAPI / ASIO est Windows uniquement)
+- Optionnel : Visual Studio 2022 / JetBrains Rider / VS Code + extension C#
+- Pour le mode Live : interface audio (ex. Arturia MiniFuse 2) avec driver ASIO installé
 
 ---
 
@@ -63,90 +58,72 @@ SmartJam/
 # Build de toute la solution
 dotnet build SmartJam.slnx
 
-# Build d'un seul projet
-dotnet build poc/PocPitch/PocPitch.csproj
-dotnet build poc/PocAccompaniment/PocAccompaniment.csproj
+# Build uniquement l'application principale
 dotnet build src/SmartJam/SmartJam.csproj
 ```
 
 ---
 
-## Lancer les POC (tests offline, sans matériel)
-
-### POC Pitch — Détection de hauteur sonore
-
-```bash
-cd poc/PocPitch
-
-# Test 1 : sinus à 440 Hz (devrait détecter "A4")
-dotnet run -- --source sine --freq 440
-
-# Test 2 : Do du milieu (C4, 261.63 Hz)
-dotnet run -- --source sine --freq 261.63
-
-# Test 3 : depuis le fichier WAV de test fourni
-dotnet run -- --source wav --path ../../assets/wav/A4_440Hz_3s.wav
-```
-
-Sortie attendue :
-```
-Temps (s) | Fréquence (Hz) | Note
-----------+----------------+------
-     0.00s |          441.0 Hz | A4
-     0.05s |          441.0 Hz | A4
-     ...
-```
-
-### POC Accompagnement — Génération + export MIDI
-
-```bash
-cd poc/PocAccompaniment
-
-# Pop en Do, 8 mesures, 120 BPM
-dotnet run -- --key C --style pop --bars 8 --tempo 120
-
-# Jazz en Sol, 8 mesures
-dotnet run -- --key G --style jazz --bars 8 --tempo 100
-
-# Blues en La, 12 mesures
-dotnet run -- --key A --style blues --bars 12 --tempo 80
-```
-
-Le fichier `.mid` est créé dans `poc/PocAccompaniment/output/progression.mid`.  
-Pour l'écouter : **VLC**, **Windows Media Player**, ou n'importe quel DAW.
-
----
-
-## Lancer l'application principale (Avalonia)
+## Lancer l'application principale
 
 ```bash
 cd src/SmartJam
 dotnet run
 ```
 
-L'application affiche :
-- **Détection de pitch** : choisir source (Sine/WAV), entrer une fréquence, cliquer "Analyser"
-- **Génération d'accompagnement** : choisir tonalité/style/tempo, cliquer "Générer"
+L'application démarre avec le mode **TestOscillator** (pas besoin de matériel) :
 
-> ⚠️ Sur Linux/macOS, l'interface Avalonia peut nécessiter un environnement graphique (X11 ou Wayland).
+1. Le mode **TestOscillator** est sélectionné par défaut.
+2. Régler la fréquence (ex. `440 Hz` → note A4) et l'amplitude.
+3. Cliquer sur **Monitoring ON** → le sinus joue et le pitch est détecté en temps réel.
+4. Passer en mode **Live** + **Monitoring ON** pour utiliser une vraie interface audio.
+5. **Settings** (placeholder) → permettra de choisir le driver ASIO et les périphériques.
 
 ---
 
-## Comment documenter (TPI)
+## Lancer les POC (tests offline, sans matériel)
 
-Les templates sont dans `docs/tpi/` :
+### POC Pitch
 
-| Fichier | Document TPI | À remplir |
-|---------|-------------|-----------|
-| `B5_processus_metier.md` | B5 — Processus métiers | Ajouter déclencheurs, résultats, cas d'erreur |
-| `G9_concept_realisation.md` | G9 — Concept de réalisation | Compléter le schéma + vrais noms de classes |
-| `G12_tests.md` | G12 — Cas de test | Remplir les résultats obtenus |
-
-### Générer le WAV de test
-
-Si le fichier `assets/wav/A4_440Hz_3s.wav` est manquant :
 ```bash
-python3 assets/wav/generate_test_wav.py
+cd poc/PocPitch
+
+# Sinus à 440 Hz (devrait détecter A4)
+dotnet run -- --source sine --freq 440
+
+# Depuis un fichier WAV
+dotnet run -- --source wav --path ../../assets/wav/A4_440Hz_3s.wav
+```
+
+### POC Accompagnement
+
+```bash
+cd poc/PocAccompaniment
+
+# Pop en Do, 8 mesures, 120 BPM
+dotnet run -- --key C --style pop --bars 8 --tempo 120
+```
+
+---
+
+## Architecture audio
+
+```
+Mode Live (WASAPI / ASIO)
+  WasapiCapture / AsioOut (input)
+      │ float[] mono
+      ├─→ BufferedWaveProvider → WasapiOut (monitoring — l'utilisateur entend ce qu'il joue)
+      ├─→ UpdateMeters() → RMS / Peak → UI
+      └─→ OnAudioFrame(samples, frames, sampleRate)
+              └─→ PitchDetectorService (YIN) → Hz + Note → UI
+
+Mode TestOscillator (WASAPI)
+  SineWaveProvider (sinus interne)
+      │ float[] mono
+      ├─→ WasapiOut (l'utilisateur entend le sinus)
+      ├─→ UpdateMeters() → RMS / Peak → UI
+      └─→ OnAudioFrame(samples, frames, sampleRate)
+              └─→ PitchDetectorService (YIN) → Hz + Note → UI
 ```
 
 ---
@@ -155,10 +132,11 @@ python3 assets/wav/generate_test_wav.py
 
 | Lib | Usage | Lien |
 |-----|-------|------|
+| **NAudio** v2.2.1 | Moteur audio (WASAPI, ASIO, BufferedWaveProvider) | https://github.com/naudio/NAudio |
 | **NWaves** v0.9.6 | Algorithme YIN (pitch detection) | https://github.com/ar1st0crat/NWaves |
-| **Melanchall.DryWetMidi** v8.0.3 | Génération + export MIDI | https://github.com/melanchall/drywetmidi |
-| **Avalonia** v12.0.1 | Interface graphique cross-platform | https://github.com/AvaloniaUI/Avalonia |
+| **Avalonia** v12.0.1 | Interface graphique (Windows) | https://github.com/AvaloniaUI/Avalonia |
 | **CommunityToolkit.Mvvm** v8.4.1 | MVVM (ObservableProperty, RelayCommand) | https://github.com/CommunityToolkit/dotnet |
+| **Melanchall.DryWetMidi** v8.0.3 | Export MIDI (POC accompagnement) | https://github.com/melanchall/drywetmidi |
 
 ---
 
@@ -168,9 +146,11 @@ python3 assets/wav/generate_test_wav.py
 - [x] Solution racine `SmartJam.slnx`
 - [x] POC Pitch : sinus + WAV + NWaves YIN + logs Hz + note
 - [x] POC Accompagnement : progression d'accords + export MIDI + README
-- [x] App Avalonia MVVM : squelette avec services + UI
-- [x] README racine : build / run / test offline + comment documenter
+- [x] **AudioEngine** : WASAPI / ASIO, monitoring, RMS/Peak, `OnAudioFrame` (adapté d'AudioBlocks)
+- [x] **SineWaveProvider** : oscillateur sinus (mode TestOscillator)
+- [x] **UI Avalonia** : Mode dropdown, OscParams, RMS bar, Monitoring ON/OFF, Settings, Freq+Note, Key/Chord, Historique, Log
+- [x] **ViewModel** : binding AudioEngine, pitch en temps réel, historique notes, log
+- [x] README racine : structure, build, run, architecture audio
 - [ ] Service MusicAnalyzerService (estimation tonalité depuis notes accumulées)
-- [ ] Service AccompanimentPlayerService (playback MIDI en temps réel)
-- [ ] Intégration micro/WASAPI (lecture en temps réel)
+- [ ] Modale Settings (sélection driver ASIO / WASAPI + périphériques)
 
