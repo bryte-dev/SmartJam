@@ -66,6 +66,13 @@
             <Setter Property="Foreground" Value="#6E8EFA"/>
             <Setter Property="Padding"    Value="6 6"/>
         </Style>
+        <Style Selector="NumericUpDown">
+            <Setter Property="Background"      Value="#2E2E42"/>
+            <Setter Property="Foreground"      Value="#CDD6F4"/>
+            <Setter Property="BorderBrush"     Value="#3D3D55"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius"    Value="6"/>
+        </Style>
         <Style Selector="TextBlock.status">
             <Setter Property="Foreground" Value="#A6E3A1"/>
             <Setter Property="FontSize"   Value="11"/>
@@ -149,9 +156,9 @@
 
                 <!-- ── ASIO Driver (visible seulement si ASIO) ───────────── -->
                 <Border Classes="card" IsVisible="{Binding IsAsioSelected}">
-                    <StackPanel Spacing="0">
+                    <StackPanel Spacing="12">
                         <TextBlock Classes="section" Text="ASIO DRIVER"/>
-                        <Grid ColumnDefinitions="*, 8, Auto">
+                        <Grid ColumnDefinitions="*, 8, Auto, 8, Auto">
                             <ComboBox Grid.Column="0"
                                       ItemsSource="{Binding AsioDrivers}"
                                       SelectedItem="{Binding SelectedAsioDriver}"/>
@@ -161,6 +168,33 @@
                                     FontSize="16"
                                     Command="{Binding RefreshDevicesCommand}"
                                     ToolTip.Tip="Rafraîchir la liste"/>
+                            <Button Grid.Column="4"
+                                    Classes="secondary"
+                                    Content="Control Panel"
+                                    Command="{Binding OpenAsioControlPanelCommand}"
+                                    ToolTip.Tip="Ouvrir le panneau de contrôle du driver ASIO"/>
+                        </Grid>
+
+                        <!-- ── Canaux ASIO ──────────────────────────────── -->
+                        <Grid ColumnDefinitions="*, 16, *">
+                            <StackPanel Grid.Column="0" Spacing="4">
+                                <TextBlock Classes="label" Text="Canal d'Entrée (décalage)"/>
+                                <NumericUpDown Value="{Binding AsioInputOffset}"
+                                               Minimum="0"
+                                               Maximum="{Binding AsioMaxInputOffset}"
+                                               Increment="1"
+                                               FormatString="0"
+                                               HorizontalAlignment="Stretch"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Spacing="4">
+                                <TextBlock Classes="label" Text="Canal de Sortie (décalage)"/>
+                                <NumericUpDown Value="{Binding AsioOutputOffset}"
+                                               Minimum="0"
+                                               Maximum="{Binding AsioMaxOutputOffset}"
+                                               Increment="1"
+                                               FormatString="0"
+                                               HorizontalAlignment="Stretch"/>
+                            </StackPanel>
                         </Grid>
                     </StackPanel>
                 </Border>

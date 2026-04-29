@@ -167,6 +167,9 @@ public class AudioEngine
         _asioOutputCount  = Math.Max(1, outputCount);
     }
 
+    public (int inputOffset, int outputOffset, int inputCount, int outputCount) GetAsioRouting()
+        => (_asioInputOffset, _asioOutputOffset, _asioInputCount, _asioOutputCount);
+
     // ── Cycle de vie ─────────────────────────────────────────────────────────
 
     public void StartMonitoring() { if (!IsMonitoring) StartAudio(); }
@@ -590,7 +593,32 @@ public class AudioEngine
             var st    = e.AsioSampleType;
             EnsureFloatBuffer(samples);
 
-            // Ton de test ASIO
+            // Mode TestOscillator : génère un sinus et l'écrit dans les sorties ASIO
+            if (Mode == AudioMode.TestOscillator)
+            {
+                double freq = _oscFrequency;
+                double amp  = _oscAmplitude;
+                double step = 2.0 * Math.PI * freq / SampleRate;
+                for (int i = 0; i < samples; i++)
+                {
+                    _floatBuffer[i] = (float)(amp * Math.Sin(_testPhase));
+                    _testPhase     += step;
+                    if (_testPhase > 2.0 * Math.PI) _testPhase -= 2.0 * Math.PI;
+                }
+                if (localOut != null)
+                    for (int c = 0; c < outCh; c++)
+                        if (localOut[c] != IntPtr.Zero)
+                            WriteAsioOutput(localOut[c], _floatBuffer, samples, st);
+
+                UpdateMeters(samples);
+                var oscSlice = new float[samples];
+                Array.Copy(_floatBuffer, oscSlice, samples);
+                OnAudioFrame?.Invoke(oscSlice, samples, SampleRate);
+                e.WrittenToOutputBuffers = true;
+                return;
+            }
+
+            // Ton de test ASIO (StartAsioTest — durée limitée)
             if (Volatile.Read(ref _testActive))
             {
                 for (int i = 0; i < samples; i++)
