@@ -1,8 +1,4 @@
 <Solution>
-  <Folder Name="/poc/">
-    <Project Path="poc/PocAccompaniment/PocAccompaniment.csproj" />
-    <Project Path="poc/PocPitch/PocPitch.csproj" />
-  </Folder>
   <Folder Name="/src/">
     <Project Path="src/SmartJam/SmartJam.csproj" />
   </Folder>
