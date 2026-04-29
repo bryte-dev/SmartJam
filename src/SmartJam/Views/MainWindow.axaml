@@ -3,13 +3,14 @@
         xmlns:vm="using:SmartJam.ViewModels"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="820" d:DesignHeight="700"
+        mc:Ignorable="d" d:DesignWidth="820" d:DesignHeight="740"
         x:Class="SmartJam.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="SmartJam"
         Width="820" MinWidth="700"
-        Height="700" MinHeight="580"
-        Background="#1E1E2E">
+        Height="740" MinHeight="600"
+        Background="#0F0F1A"
+        FontFamily="Inter,Segoe UI,sans-serif">
 
     <Design.DataContext>
         <vm:MainWindowViewModel/>
@@ -18,61 +19,76 @@
     <!-- ── Styles globaux ─────────────────────────────────────────────────── -->
     <Window.Styles>
         <Style Selector="TextBlock">
-            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="Foreground" Value="#C8D0E8"/>
+            <Setter Property="FontFamily" Value="Inter,Segoe UI,sans-serif"/>
         </Style>
         <Style Selector="TextBlock.label">
-            <Setter Property="Foreground" Value="#A6ADC8"/>
-            <Setter Property="FontSize"   Value="11"/>
-            <Setter Property="Margin"     Value="0 0 0 3"/>
+            <Setter Property="Foreground"    Value="#5A6070"/>
+            <Setter Property="FontSize"      Value="10"/>
+            <Setter Property="FontWeight"    Value="Medium"/>
+            <Setter Property="Margin"        Value="0 0 0 4"/>
+            <Setter Property="LetterSpacing" Value="1"/>
         </Style>
         <Style Selector="TextBlock.section-title">
-            <Setter Property="Foreground"  Value="#89B4FA"/>
-            <Setter Property="FontSize"    Value="13"/>
-            <Setter Property="FontWeight"  Value="SemiBold"/>
-            <Setter Property="Margin"      Value="0 0 0 8"/>
+            <Setter Property="Foreground"    Value="#6E8EFA"/>
+            <Setter Property="FontSize"      Value="11"/>
+            <Setter Property="FontWeight"    Value="SemiBold"/>
+            <Setter Property="Margin"        Value="0 0 0 10"/>
+            <Setter Property="LetterSpacing" Value="1.5"/>
         </Style>
         <Style Selector="Border.card">
-            <Setter Property="Background"    Value="#313244"/>
-            <Setter Property="CornerRadius"  Value="8"/>
-            <Setter Property="Padding"       Value="14"/>
-            <Setter Property="Margin"        Value="0 0 0 10"/>
+            <Setter Property="Background"   Value="#171728"/>
+            <Setter Property="CornerRadius" Value="10"/>
+            <Setter Property="Padding"      Value="18 14"/>
+            <Setter Property="Margin"       Value="0 0 0 10"/>
+            <Setter Property="BorderBrush"  Value="#252538"/>
+            <Setter Property="BorderThickness" Value="1"/>
         </Style>
         <Style Selector="Button">
-            <Setter Property="Background"   Value="#89B4FA"/>
-            <Setter Property="Foreground"   Value="#1E1E2E"/>
-            <Setter Property="Padding"      Value="14 8"/>
-            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Background"   Value="#6E8EFA"/>
+            <Setter Property="Foreground"   Value="#0A0A14"/>
+            <Setter Property="Padding"      Value="16 9"/>
+            <Setter Property="CornerRadius" Value="7"/>
             <Setter Property="FontWeight"   Value="SemiBold"/>
+            <Setter Property="FontSize"     Value="12"/>
+            <Setter Property="FontFamily"   Value="Inter,Segoe UI,sans-serif"/>
         </Style>
         <Style Selector="Button.danger">
-            <Setter Property="Background" Value="#F38BA8"/>
+            <Setter Property="Background" Value="#D4556B"/>
+            <Setter Property="Foreground" Value="#FFF0F3"/>
         </Style>
         <Style Selector="Button.secondary">
-            <Setter Property="Background" Value="#45475A"/>
-            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="Background" Value="#1E1E30"/>
+            <Setter Property="Foreground" Value="#7A88AA"/>
+            <Setter Property="BorderBrush" Value="#2D2D48"/>
+            <Setter Property="BorderThickness" Value="1"/>
         </Style>
         <Style Selector="ComboBox">
-            <Setter Property="Background" Value="#45475A"/>
-            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="Background"      Value="#1A1A2C"/>
+            <Setter Property="Foreground"      Value="#C8D0E8"/>
+            <Setter Property="BorderBrush"     Value="#2D2D48"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius"    Value="6"/>
         </Style>
         <Style Selector="NumericUpDown">
-            <Setter Property="Background" Value="#45475A"/>
-            <Setter Property="Foreground" Value="#CDD6F4"/>
+            <Setter Property="Background"  Value="#1A1A2C"/>
+            <Setter Property="Foreground"  Value="#C8D0E8"/>
+            <Setter Property="BorderBrush" Value="#2D2D48"/>
+            <Setter Property="BorderThickness" Value="1"/>
         </Style>
         <Style Selector="Slider">
-            <Setter Property="Foreground" Value="#89B4FA"/>
+            <Setter Property="Foreground" Value="#6E8EFA"/>
         </Style>
         <Style Selector="ProgressBar">
-            <Setter Property="Background"  Value="#45475A"/>
-            <Setter Property="Foreground"  Value="#A6E3A1"/>
-            <Setter Property="CornerRadius" Value="4"/>
-            <Setter Property="Height"      Value="12"/>
+            <Setter Property="Background"   Value="#1A1A2C"/>
+            <Setter Property="CornerRadius" Value="3"/>
+            <Setter Property="Height"       Value="10"/>
         </Style>
         <Style Selector="ListBox">
-            <Setter Property="Background"   Value="#181825"/>
-            <Setter Property="Foreground"   Value="#A6ADC8"/>
-            <Setter Property="FontFamily"   Value="Consolas,Monospace"/>
-            <Setter Property="FontSize"     Value="11"/>
+            <Setter Property="Background"      Value="#0C0C18"/>
+            <Setter Property="Foreground"      Value="#6070A0"/>
+            <Setter Property="FontFamily"      Value="Consolas,Monospace"/>
+            <Setter Property="FontSize"        Value="11"/>
             <Setter Property="BorderThickness" Value="0"/>
         </Style>
     </Window.Styles>
@@ -80,149 +96,188 @@
     <DockPanel LastChildFill="True">
 
         <!-- ── En-tête ──────────────────────────────────────────────────── -->
-        <Border DockPanel.Dock="Top" Background="#181825" Padding="18 10">
+        <Border DockPanel.Dock="Top" Background="#0A0A14" Padding="22 13"
+                BorderBrush="#1A1A2C" BorderThickness="0 0 0 1">
             <Grid ColumnDefinitions="*, Auto">
-                <!-- Titre -->
-                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                    <TextBlock Text="🎸" FontSize="22" VerticalAlignment="Center"/>
+                <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
+                    <!-- Logo mark -->
+                    <Border Width="34" Height="34" CornerRadius="8" Background="#1A1E3A">
+                        <TextBlock Text="SJ" FontSize="14" FontWeight="Bold"
+                                   Foreground="#6E8EFA"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                    </Border>
                     <StackPanel VerticalAlignment="Center">
-                        <TextBlock Text="SmartJam" FontSize="18" FontWeight="Bold" Foreground="#89B4FA"/>
-                        <TextBlock Text="Détection de pitch en temps réel" FontSize="11" Foreground="#6C7086"/>
+                        <TextBlock Text="SmartJam"
+                                   FontSize="17" FontWeight="Bold"
+                                   Foreground="#C8D0E8"/>
+                        <TextBlock Text="Détection de pitch en temps réel"
+                                   FontSize="11" Foreground="#3A3A58"/>
                     </StackPanel>
                 </StackPanel>
+
                 <!-- Bouton Settings -->
                 <Button Grid.Column="1"
-                        Content="⚙  Settings"
                         Classes="secondary"
                         Command="{Binding OpenSettingsCommand}"
-                        VerticalAlignment="Center"/>
+                        VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" Spacing="7">
+                        <!-- Icône engrenage SVG-style via path ou simple texte unicode -->
+                        <TextBlock Text="&#9881;" FontSize="13" VerticalAlignment="Center"
+                                   Foreground="#7A88AA"/>
+                        <TextBlock Text="Settings" FontSize="12" VerticalAlignment="Center"
+                                   Foreground="#7A88AA"/>
+                    </StackPanel>
+                </Button>
             </Grid>
         </Border>
 
         <!-- ── Contenu principal ─────────────────────────────────────────── -->
-        <ScrollViewer Padding="16 12">
+        <ScrollViewer Padding="18 14">
             <StackPanel Spacing="0">
 
                 <!-- ── Carte 1 : Mode + Monitoring ──────────────────────── -->
                 <Border Classes="card">
-                    <Grid ColumnDefinitions="*, Auto" RowDefinitions="Auto, Auto">
-
-                        <StackPanel Grid.Column="0" Grid.Row="0" Spacing="4">
-                            <TextBlock Classes="label" Text="Mode"/>
+                    <Grid ColumnDefinitions="*, Auto">
+                        <StackPanel Grid.Column="0" Spacing="4">
+                            <TextBlock Classes="label" Text="MODE"/>
                             <ComboBox ItemsSource="{Binding Modes}"
                                       SelectedItem="{Binding SelectedMode}"
-                                      MinWidth="160"/>
+                                      MinWidth="170"/>
                         </StackPanel>
 
-                        <Button Grid.Column="1" Grid.Row="0"
+                        <Button Grid.Column="1"
                                 Command="{Binding ToggleMonitoringCommand}"
                                 Content="{Binding MonitoringButtonText}"
                                 Classes.danger="{Binding IsMonitoring}"
                                 VerticalAlignment="Bottom"
-                                Margin="12 0 0 0"/>
+                                Margin="14 0 0 0"/>
                     </Grid>
                 </Border>
 
-                <!-- ── Carte 2 : Paramètres oscillateur (TestOscillator uniquement) ── -->
+                <!-- ── Carte 2 : Oscillateur (TestOscillator uniquement) ── -->
                 <Border Classes="card" IsVisible="{Binding IsOscillatorPanelVisible}">
-                    <StackPanel Spacing="10">
-                        <TextBlock Classes="section-title" Text="🔊 Paramètres Oscillateur"/>
-                        <Grid ColumnDefinitions="*, 24, *">
+                    <StackPanel Spacing="12">
+                        <TextBlock Classes="section-title" Text="OSCILLATEUR DE TEST"/>
+                        <Grid ColumnDefinitions="*, 20, *">
 
-                            <!-- Fréquence -->
                             <StackPanel Grid.Column="0" Spacing="4">
-                                <TextBlock Classes="label" Text="Fréquence (Hz)"/>
+                                <TextBlock Classes="label" Text="FRÉQUENCE (Hz)"/>
                                 <NumericUpDown Value="{Binding OscFrequency}"
                                                Minimum="20" Maximum="4000"
                                                Increment="1" FormatString="F0"
                                                Width="160" HorizontalAlignment="Left"/>
                             </StackPanel>
 
-                            <!-- Amplitude -->
                             <StackPanel Grid.Column="2" Spacing="4">
-                                <TextBlock Classes="label" Text="Amplitude"/>
+                                <TextBlock Classes="label" Text="AMPLITUDE"/>
                                 <Slider Minimum="0" Maximum="1"
                                         Value="{Binding OscAmplitude}"
-                                        TickFrequency="0.1"
-                                        IsSnapToTickEnabled="False"/>
+                                        TickFrequency="0.1"/>
                                 <TextBlock Text="{Binding OscAmplitude, StringFormat={}{0:F2}}"
-                                           FontSize="11" Foreground="#A6ADC8"/>
+                                           FontSize="11" Foreground="#5A6070"/>
                             </StackPanel>
                         </Grid>
                     </StackPanel>
                 </Border>
 
-                <!-- ── Carte 3 : Niveau d'entrée ────────────────────────── -->
+                <!-- ── Carte 3 : VU-mètre ───────────────────────────────── -->
                 <Border Classes="card">
-                    <StackPanel Spacing="6">
-                        <TextBlock Classes="section-title" Text="📊 Niveau d'entrée"/>
-                        <Grid ColumnDefinitions="80, *, 12">
-                            <TextBlock Classes="label" Text="RMS" VerticalAlignment="Center"/>
-                            <ProgressBar Grid.Column="1"
+                    <StackPanel Spacing="10">
+                        <TextBlock Classes="section-title" Text="NIVEAU D'ENTRÉE"/>
+
+                        <!-- RMS meter avec dégradé vert → jaune → rouge -->
+                        <Grid ColumnDefinitions="52, *" RowDefinitions="Auto, 6, Auto">
+                            <TextBlock Grid.Column="0" Grid.Row="0"
+                                       Classes="label" Text="RMS"
+                                       VerticalAlignment="Center"/>
+                            <ProgressBar Grid.Column="1" Grid.Row="0"
                                          Minimum="0" Maximum="1"
-                                         Value="{Binding InputLevel}"/>
-                        </Grid>
-                        <Grid ColumnDefinitions="80, *, 12">
-                            <TextBlock Classes="label" Text="Peak" VerticalAlignment="Center"/>
-                            <ProgressBar Grid.Column="1"
+                                         Value="{Binding InputLevel}">
+                                <ProgressBar.Foreground>
+                                    <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
+                                        <GradientStop Color="#2EA04A" Offset="0.0"/>
+                                        <GradientStop Color="#68C73F" Offset="0.55"/>
+                                        <GradientStop Color="#E8C840" Offset="0.75"/>
+                                        <GradientStop Color="#E87830" Offset="0.88"/>
+                                        <GradientStop Color="#D43848" Offset="1.0"/>
+                                    </LinearGradientBrush>
+                                </ProgressBar.Foreground>
+                            </ProgressBar>
+
+                            <TextBlock Grid.Column="0" Grid.Row="2"
+                                       Classes="label" Text="PEAK"
+                                       VerticalAlignment="Center"/>
+                            <ProgressBar Grid.Column="1" Grid.Row="2"
                                          Minimum="0" Maximum="1"
                                          Value="{Binding PeakLevel}"
-                                         Foreground="#F38BA8"/>
+                                         Height="6">
+                                <ProgressBar.Foreground>
+                                    <LinearGradientBrush StartPoint="0%,50%" EndPoint="100%,50%">
+                                        <GradientStop Color="#2EA04A" Offset="0.0"/>
+                                        <GradientStop Color="#68C73F" Offset="0.55"/>
+                                        <GradientStop Color="#E8C840" Offset="0.75"/>
+                                        <GradientStop Color="#D43848" Offset="1.0"/>
+                                    </LinearGradientBrush>
+                                </ProgressBar.Foreground>
+                            </ProgressBar>
                         </Grid>
                     </StackPanel>
                 </Border>
 
-                <!-- ── Carte 4 : Affichage principal Fréquence + Note ────── -->
+                <!-- ── Carte 4 : Affichage Fréquence + Note (pièce maîtresse) ── -->
                 <Border Classes="card">
                     <Grid ColumnDefinitions="*, 1, *">
 
                         <!-- Fréquence détectée -->
-                        <StackPanel Grid.Column="0" HorizontalAlignment="Center" Spacing="4">
+                        <StackPanel Grid.Column="0" HorizontalAlignment="Center" Spacing="6">
                             <TextBlock Classes="label"
-                                       Text="FRÉQUENCE DÉTECTÉE"
+                                       Text="FRÉQUENCE"
                                        HorizontalAlignment="Center"
                                        LetterSpacing="2"/>
                             <TextBlock Text="{Binding DetectedFrequency}"
-                                       FontSize="40" FontWeight="Bold"
-                                       Foreground="#A6E3A1"
-                                       HorizontalAlignment="Center"/>
+                                       FontSize="44" FontWeight="Bold"
+                                       Foreground="#5EC480"
+                                       HorizontalAlignment="Center"
+                                       FontFamily="Inter,Segoe UI,sans-serif"/>
                         </StackPanel>
 
                         <!-- Séparateur -->
-                        <Border Grid.Column="1" Background="#45475A" Width="1" Margin="0 8"/>
+                        <Border Grid.Column="1" Background="#252538" Width="1" Margin="0 10"/>
 
                         <!-- Note détectée -->
-                        <StackPanel Grid.Column="2" HorizontalAlignment="Center" Spacing="4">
+                        <StackPanel Grid.Column="2" HorizontalAlignment="Center" Spacing="6">
                             <TextBlock Classes="label"
                                        Text="NOTE"
                                        HorizontalAlignment="Center"
                                        LetterSpacing="2"/>
                             <TextBlock Text="{Binding DetectedNote}"
-                                       FontSize="40" FontWeight="Bold"
-                                       Foreground="#CBA6F7"
-                                       HorizontalAlignment="Center"/>
+                                       FontSize="44" FontWeight="Bold"
+                                       Foreground="#9C7EE8"
+                                       HorizontalAlignment="Center"
+                                       FontFamily="Inter,Segoe UI,sans-serif"/>
                         </StackPanel>
                     </Grid>
                 </Border>
 
-                <!-- ── Carte 5 : Analyse harmonique (placeholders) ───────── -->
+                <!-- ── Carte 5 : Analyse harmonique ─────────────────────── -->
                 <Border Classes="card">
                     <StackPanel Spacing="10">
-                        <TextBlock Classes="section-title" Text="🎼 Analyse harmonique"/>
+                        <TextBlock Classes="section-title" Text="ANALYSE HARMONIQUE"/>
                         <Grid ColumnDefinitions="*, 16, *">
 
                             <StackPanel Grid.Column="0" Spacing="4">
                                 <TextBlock Classes="label" Text="TONALITÉ PROBABLE"/>
                                 <TextBlock Text="{Binding PossibleKey}"
-                                           FontSize="20" FontWeight="SemiBold"
-                                           Foreground="#89DCEB"/>
+                                           FontSize="22" FontWeight="SemiBold"
+                                           Foreground="#5BC0D0"/>
                             </StackPanel>
 
                             <StackPanel Grid.Column="2" Spacing="4">
                                 <TextBlock Classes="label" Text="ACCORD PROBABLE"/>
                                 <TextBlock Text="{Binding PossibleChord}"
-                                           FontSize="20" FontWeight="SemiBold"
-                                           Foreground="#89DCEB"/>
+                                           FontSize="22" FontWeight="SemiBold"
+                                           Foreground="#5BC0D0"/>
                             </StackPanel>
                         </Grid>
                     </StackPanel>
@@ -230,8 +285,8 @@
 
                 <!-- ── Carte 6 : Historique des notes ───────────────────── -->
                 <Border Classes="card">
-                    <StackPanel Spacing="6">
-                        <TextBlock Classes="section-title" Text="📋 Notes jouées (historique)"/>
+                    <StackPanel Spacing="8">
+                        <TextBlock Classes="section-title" Text="NOTES JOUÉES"/>
                         <ItemsControl ItemsSource="{Binding PlayedNotes}">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
@@ -240,26 +295,28 @@
                             </ItemsControl.ItemsPanel>
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Border Background="#45475A" CornerRadius="4"
-                                            Padding="8 4" Margin="3">
+                                    <Border Background="#1A1A2C"
+                                            BorderBrush="#2D2D48" BorderThickness="1"
+                                            CornerRadius="5"
+                                            Padding="10 5" Margin="3 3">
                                         <TextBlock Text="{Binding}"
                                                    FontSize="13" FontWeight="SemiBold"
-                                                   Foreground="#F9E2AF"/>
+                                                   Foreground="#D4A840"/>
                                     </Border>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
                         <TextBlock Text="(aucune note détectée pour l'instant)"
-                                   Foreground="#6C7086" FontSize="11"/>
+                                   Foreground="#2E2E48" FontSize="11"/>
                     </StackPanel>
                 </Border>
 
                 <!-- ── Carte 7 : Log ─────────────────────────────────────── -->
                 <Border Classes="card">
-                    <StackPanel Spacing="6">
-                        <TextBlock Classes="section-title" Text="📝 Log"/>
+                    <StackPanel Spacing="8">
+                        <TextBlock Classes="section-title" Text="JOURNAL"/>
                         <ListBox ItemsSource="{Binding LogMessages}"
-                                 Height="120"
+                                 Height="110"
                                  ScrollViewer.VerticalScrollBarVisibility="Auto"/>
                     </StackPanel>
                 </Border>
@@ -269,3 +326,4 @@
     </DockPanel>
 
 </Window>
+
