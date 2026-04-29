@@ -1,9 +1,11 @@
 using System.Collections.ObjectModel;
+using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using SmartJam.Audio;
 using SmartJam.Services;
+using SmartJam.Views;
 
 namespace SmartJam.ViewModels;
 
@@ -159,10 +161,35 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     }
 
     [RelayCommand]
-    private void OpenSettings()
+    private async Task OpenSettings()
     {
-        // Placeholder — la modale Settings sera implémentée dans une prochaine itération.
-        AddLog("Settings : non implémenté pour l'instant.");
+        var settingsVm = new SettingsViewModel(_engine);
+        var window     = new SettingsWindow { DataContext = settingsVm };
+
+        // Récupère la fenêtre principale comme owner pour centrer la modale
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;
+        var mainWin  = lifetime?.MainWindow;
+
+        if (mainWin != null)
+            await window.ShowDialog(mainWin);
+        else
+            window.Show();
+
+        if (settingsVm.StatusMessage == "Paramètres appliqués.")
+        {
+            AddLog($"Settings appliqués : {settingsVm.SelectedAudioDriver}, " +
+                   $"{settingsVm.SelectedSampleRate} Hz, buffer {settingsVm.SelectedBufferSize}");
+
+            if (IsMonitoring)
+            {
+                _engine.StopMonitoring();
+                IsMonitoring         = false;
+                MonitoringButtonText = "Monitoring ON";
+                InputLevel           = 0;
+                PeakLevel            = 0;
+                AddLog("Monitoring arrêté — relancer après avoir changé les settings.");
+            }
+        }
     }
 
     // ── Logique audio (callbacks sur thread NAudio) ───────────────────────────
