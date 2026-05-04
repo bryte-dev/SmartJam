@@ -180,15 +180,9 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
             AddLog($"Settings appliqués : {settingsVm.SelectedAudioDriver}, " +
                    $"{settingsVm.SelectedSampleRate} Hz, buffer {settingsVm.SelectedBufferSize}");
 
-            if (IsMonitoring)
-            {
-                _engine.StopMonitoring();
-                IsMonitoring         = false;
-                MonitoringButtonText = "Monitoring ON";
-                InputLevel           = 0;
-                PeakLevel            = 0;
-                AddLog("Monitoring arrêté — relancer après avoir changé les settings.");
-            }
+            // Sync l'état UI depuis l'engine (le rebuild a déjà eu lieu dans Apply())
+            IsMonitoring         = _engine.IsMonitoring;
+            MonitoringButtonText = _engine.IsMonitoring ? "Monitoring OFF" : "Monitoring ON";
         }
     }
 

@@ -248,6 +248,7 @@ public partial class SettingsViewModel : ViewModelBase
             _engine.OutputDevice = outIdx >= 0 ? _outputDeviceObjects[outIdx] : null;
         }
 
+        _engine.RebuildAudioGraph();
         StatusMessage = "Paramètres appliqués.";
     }
 }
