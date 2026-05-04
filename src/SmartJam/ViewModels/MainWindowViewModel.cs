@@ -49,7 +49,7 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     // ── Paramètres oscillateur ────────────────────────────────────────────────
 
     [ObservableProperty]
-    private double _oscFrequency = 440.0;
+    private double? _oscFrequency = 440.0;
 
     [ObservableProperty]
     private double _oscAmplitude = 0.5;
@@ -125,8 +125,11 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         }
     }
 
-    partial void OnOscFrequencyChanged(double value)
-        => _engine.OscillatorFrequency = (float)value;
+    partial void OnOscFrequencyChanged(double? value)
+    {
+        if (value is null) return;                
+        _engine.OscillatorFrequency = (float)value.Value;
+    }
 
     partial void OnOscAmplitudeChanged(double value)
         => _engine.OscillatorAmplitude = (float)value;

@@ -52,7 +52,8 @@
             <Setter Property="Height"              Value="40"/>
             <Setter Property="FontSize"            Value="14"/>
             <Setter Property="HorizontalAlignment" Value="Stretch"/>
-        </Style>
+			<Setter Property="DataValidationErrors.ErrorTemplate" Value="{x:Null}"/>
+		</Style>
         <Style Selector="Button">
             <Setter Property="FontFamily"   Value="Inter,Segoe UI,sans-serif"/>
             <Setter Property="FontWeight"   Value="SemiBold"/>
@@ -80,6 +81,7 @@
             <Setter Property="BorderBrush"     Value="#CBD5E1"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="CornerRadius"    Value="8"/>
+			<Setter Property="DataValidationErrors.ErrorTemplate" Value="{x:Null}"/>
         </Style>
         <Style Selector="TextBlock.status">
             <Setter Property="Foreground" Value="#059669"/>
