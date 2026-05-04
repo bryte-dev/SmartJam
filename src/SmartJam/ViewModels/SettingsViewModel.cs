@@ -47,7 +47,32 @@ public partial class SettingsViewModel : ViewModelBase
     public ObservableCollection<string> AsioDrivers { get; } = [];
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AsioMaxInputOffset))]
+    [NotifyPropertyChangedFor(nameof(AsioMaxOutputOffset))]
     private string? _selectedAsioDriver;
+
+    // ── ASIO — canaux ────────────────────────────────────────────────────────
+
+    [ObservableProperty]
+    private int _asioInputOffset;
+
+    [ObservableProperty]
+    private int _asioOutputOffset;
+
+    private int _asioMaxInputOffset  = 7;
+    private int _asioMaxOutputOffset = 7;
+
+    public int AsioMaxInputOffset
+    {
+        get => _asioMaxInputOffset;
+        private set => SetProperty(ref _asioMaxInputOffset, value);
+    }
+
+    public int AsioMaxOutputOffset
+    {
+        get => _asioMaxOutputOffset;
+        private set => SetProperty(ref _asioMaxOutputOffset, value);
+    }
 
     // ── Sample Rate ───────────────────────────────────────────────────────────
 
@@ -86,9 +111,48 @@ public partial class SettingsViewModel : ViewModelBase
             AudioDriver.ASIO             => "ASIO",
             _                            => "WASAPI Shared"
         };
+
+        var routing = engine.GetAsioRouting();
+        AsioInputOffset  = routing.inputOffset;
+        AsioOutputOffset = routing.outputOffset;
+
+        // Si un driver ASIO est déjà sélectionné, on sonde ses canaux
+        if (SelectedAsioDriver != null)
+            ProbeAndUpdateAsioChannels(SelectedAsioDriver);
+    }
+
+    // ── Handlers de changement de propriété ──────────────────────────────────
+
+    partial void OnSelectedAsioDriverChanged(string? value)
+    {
+        if (value != null)
+            ProbeAndUpdateAsioChannels(value);
+    }
+
+    private void ProbeAndUpdateAsioChannels(string driverName)
+    {
+        try
+        {
+            var (inCnt, outCnt) = _engine.ProbeAsioChannels(driverName);
+            AsioMaxInputOffset  = Math.Max(0, inCnt  - 1);
+            AsioMaxOutputOffset = Math.Max(0, outCnt - 1);
+            if (AsioInputOffset  > AsioMaxInputOffset)  AsioInputOffset  = 0;
+            if (AsioOutputOffset > AsioMaxOutputOffset) AsioOutputOffset = 0;
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Impossible de sonder les canaux ASIO : {ex.Message}";
+        }
     }
 
     // ── Commandes ─────────────────────────────────────────────────────────────
+
+    [RelayCommand]
+    private void OpenAsioControlPanel()
+    {
+        bool ok = _engine.ShowAsioControlPanel();
+        StatusMessage = ok ? "Panneau de contrôle ASIO ouvert." : "Panneau ASIO indisponible ou non supporté par ce driver.";
+    }
 
     [RelayCommand]
     private void RefreshDevices()
@@ -169,7 +233,11 @@ public partial class SettingsViewModel : ViewModelBase
         };
 
         if (IsAsioSelected && SelectedAsioDriver != null)
+        {
             _engine.SetAsioDriver(SelectedAsioDriver);
+            _engine.SetAsioRouting(AsioInputOffset, AsioOutputOffset,
+                                   inputCount: 1, outputCount: 2);
+        }
 
         if (IsWasapiSelected)
         {
