@@ -14,10 +14,5 @@ public partial class SettingsWindow : Window
         => Close();
 
     private void OnApplyClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        // Apply command is already bound; close after applying
-        if (DataContext is SettingsViewModel vm)
-            vm.ApplyCommand.Execute(null);
-        Close();
-    }
+        => Close();
 }
