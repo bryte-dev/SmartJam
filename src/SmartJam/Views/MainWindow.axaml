@@ -1,0 +1,177 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:SmartJam.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="700" d:DesignHeight="550"
+        x:Class="SmartJam.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="SmartJam — Détection de pitch et accompagnement"
+        Width="700" Height="550"
+        Background="#1E1E2E">
+
+    <Design.DataContext>
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <!-- Police de base -->
+    <Window.Styles>
+        <Style Selector="TextBlock">
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+        </Style>
+        <Style Selector="Border.card">
+            <Setter Property="Background" Value="#313244"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="Margin" Value="0 0 0 12"/>
+        </Style>
+        <Style Selector="TextBlock.label">
+            <Setter Property="Foreground" Value="#A6ADC8"/>
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="Margin" Value="0 0 0 2"/>
+        </Style>
+        <Style Selector="Button">
+            <Setter Property="Background" Value="#89B4FA"/>
+            <Setter Property="Foreground" Value="#1E1E2E"/>
+            <Setter Property="Padding" Value="16 8"/>
+            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+        <Style Selector="ComboBox">
+            <Setter Property="Background" Value="#45475A"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+        </Style>
+        <Style Selector="NumericUpDown">
+            <Setter Property="Background" Value="#45475A"/>
+            <Setter Property="Foreground" Value="#CDD6F4"/>
+        </Style>
+    </Window.Styles>
+
+    <DockPanel LastChildFill="True">
+
+        <!-- En-tête -->
+        <Border DockPanel.Dock="Top" Background="#181825" Padding="20 12">
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <TextBlock Text="🎸" FontSize="24" VerticalAlignment="Center"/>
+                <StackPanel>
+                    <TextBlock Text="SmartJam" FontSize="20" FontWeight="Bold" Foreground="#89B4FA"/>
+                    <TextBlock Text="Détection de pitch · Génération d'accompagnement" FontSize="12" Foreground="#6C7086"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- Barre de statut en bas -->
+        <Border DockPanel.Dock="Bottom" Background="#181825" Padding="20 8">
+            <TextBlock Text="{Binding StatusMessage}" FontSize="12" Foreground="#6C7086"/>
+        </Border>
+
+        <!-- Contenu principal -->
+        <ScrollViewer Padding="20 16">
+            <StackPanel Spacing="0">
+
+                <!-- Carte 1 : Source audio + Pitch -->
+                <Border Classes="card">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="🎵 Détection de Pitch" FontSize="15" FontWeight="SemiBold" Foreground="#89B4FA"/>
+
+                        <!-- Choix de la source -->
+                        <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto">
+                            <TextBlock Classes="label" Text="Source audio" Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2"/>
+                            <ComboBox Grid.Row="1" Grid.Column="0"
+                                      SelectedItem="{Binding SelectedSource}"
+                                      MinWidth="120" Margin="0 0 12 0">
+                                <ComboBoxItem>Sine</ComboBoxItem>
+                                <ComboBoxItem>WAV</ComboBoxItem>
+                            </ComboBox>
+                            <!-- Fréquence sinus -->
+                            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Spacing="8"
+                                        IsVisible="{Binding SelectedSource, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                <TextBlock Text="Fréquence :" VerticalAlignment="Center" Foreground="#A6ADC8"/>
+                                <NumericUpDown Value="{Binding SineFrequency}"
+                                               Minimum="60" Maximum="1200" Increment="1"
+                                               FormatString="F0" Width="120"/>
+                                <TextBlock Text="Hz" VerticalAlignment="Center" Foreground="#A6ADC8"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- Bouton Analyser -->
+                        <Button Content="Analyser le pitch" Command="{Binding AnalysePitchCommand}" HorizontalAlignment="Left"/>
+
+                        <!-- Résultat pitch -->
+                        <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto">
+                            <TextBlock Classes="label" Text="Fréquence détectée" Grid.Row="0" Grid.Column="0"/>
+                            <TextBlock Classes="label" Text="Note" Grid.Row="0" Grid.Column="1"/>
+                            <TextBlock Text="{Binding DetectedFrequency}" FontSize="28" FontWeight="Bold"
+                                       Foreground="#A6E3A1" Grid.Row="1" Grid.Column="0"/>
+                            <TextBlock Text="{Binding DetectedNote}" FontSize="28" FontWeight="Bold"
+                                       Foreground="#F38BA8" Grid.Row="1" Grid.Column="1"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- Carte 2 : Génération d'accompagnement -->
+                <Border Classes="card">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="🎹 Génération d'Accompagnement" FontSize="15" FontWeight="SemiBold" Foreground="#89B4FA"/>
+
+                        <!-- Paramètres -->
+                        <WrapPanel Orientation="Horizontal">
+                            <!-- Tonalité -->
+                            <StackPanel Margin="0 0 16 8">
+                                <TextBlock Classes="label" Text="Tonalité"/>
+                                <ComboBox SelectedItem="{Binding SelectedKey}" MinWidth="80">
+                                    <ComboBoxItem>C</ComboBoxItem>
+                                    <ComboBoxItem>D</ComboBoxItem>
+                                    <ComboBoxItem>E</ComboBoxItem>
+                                    <ComboBoxItem>F</ComboBoxItem>
+                                    <ComboBoxItem>G</ComboBoxItem>
+                                    <ComboBoxItem>A</ComboBoxItem>
+                                    <ComboBoxItem>B</ComboBoxItem>
+                                </ComboBox>
+                            </StackPanel>
+
+                            <!-- Style -->
+                            <StackPanel Margin="0 0 16 8">
+                                <TextBlock Classes="label" Text="Style"/>
+                                <ComboBox SelectedItem="{Binding SelectedStyle}" MinWidth="100">
+                                    <ComboBoxItem>pop</ComboBoxItem>
+                                    <ComboBoxItem>jazz</ComboBoxItem>
+                                    <ComboBoxItem>blues</ComboBoxItem>
+                                </ComboBox>
+                            </StackPanel>
+
+                            <!-- Tempo -->
+                            <StackPanel Margin="0 0 16 8">
+                                <TextBlock Classes="label" Text="Tempo (BPM)"/>
+                                <NumericUpDown Value="{Binding Tempo}" Minimum="60" Maximum="240" Increment="5" Width="120"/>
+                            </StackPanel>
+
+                            <!-- Mesures -->
+                            <StackPanel Margin="0 0 0 8">
+                                <TextBlock Classes="label" Text="Mesures"/>
+                                <NumericUpDown Value="{Binding Bars}" Minimum="2" Maximum="32" Increment="2" Width="100"/>
+                            </StackPanel>
+                        </WrapPanel>
+
+                        <!-- Bouton Générer -->
+                        <Button Content="Générer la progression" Command="{Binding GenerateProgressionCommand}" HorizontalAlignment="Left"/>
+
+                        <!-- Résultat progression -->
+                        <StackPanel>
+                            <TextBlock Classes="label" Text="Progression générée"/>
+                            <Border Background="#1E1E2E" CornerRadius="4" Padding="12">
+                                <TextBlock Text="{Binding GeneratedProgression}"
+                                           FontFamily="Consolas,Monospace"
+                                           FontSize="13" Foreground="#CBA6F7"
+                                           TextWrapping="Wrap"/>
+                            </Border>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+
+</Window>
+
