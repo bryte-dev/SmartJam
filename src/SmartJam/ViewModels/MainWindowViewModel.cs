@@ -19,14 +19,20 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
 {
     // ── Services ─────────────────────────────────────────────────────────────
 
-    private readonly AudioEngine        _engine      = new();
+    private readonly AudioEngine          _engine       = new();
     private readonly PitchDetectorService _pitchService = new(sampleRate: 44100);
+    // Cache des services pitch pour d'autres fréquences d'échantillonnage
+    private readonly Dictionary<int, PitchDetectorService> _pitchServiceCache = new();
 
     // Buffer d'accumulation pour la détection de pitch
     private readonly List<float> _sampleBuffer = new();
-    private const int AnalysisWindowSize = 4096; // ~93 ms à 44100 Hz
+    private const int AnalysisWindowSize = 4096;   // ~93 ms à 44100 Hz
     private const int MaxPlayedNotes     = 20;
     private const int MaxLogMessages     = 150;
+    // Facteur d'échelle RMS → ProgressBar (signal typique ~0.1–0.3 RMS)
+    private const double RmsVisualScale  = 4.0;
+
+    private bool _disposed;
 
     // ── Mode ─────────────────────────────────────────────────────────────────
 
@@ -165,14 +171,15 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     {
         lock (_sampleBuffer)
         {
-            _sampleBuffer.AddRange(samples.Take(frames));
+            // Évite l'allocation d'un énumérateur LINQ — utilise ArraySegment
+            _sampleBuffer.AddRange(new ArraySegment<float>(samples, 0, Math.Min(frames, samples.Length)));
 
             if (_sampleBuffer.Count >= AnalysisWindowSize)
             {
-                var batch = _sampleBuffer.Take(AnalysisWindowSize).ToArray();
+                var batch = _sampleBuffer.GetRange(0, AnalysisWindowSize).ToArray();
                 _sampleBuffer.RemoveRange(0, AnalysisWindowSize);
 
-                // Lancer la détection de pitch sur un thread séparé (non bloquant)
+                // Détection de pitch sur un thread séparé (non bloquant)
                 Task.Run(() => RunPitchDetection(batch, sampleRate));
             }
         }
@@ -182,8 +189,8 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     {
         Dispatcher.UIThread.Post(() =>
         {
-            // Facteur ×4 pour une meilleure lisibilité visuelle (signal typique ~0.1–0.3 RMS)
-            InputLevel = Math.Min(1.0, rms * 4.0);
+            // RmsVisualScale : amplifie le RMS pour une meilleure lisibilité (signal typique ~0.1–0.3)
+            InputLevel = Math.Min(1.0, rms * RmsVisualScale);
             PeakLevel  = Math.Min(1.0, peak);
         });
     }
@@ -195,11 +202,23 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
 
     private void RunPitchDetection(float[] samples, int sampleRate)
     {
-        // Utilise le service existant (YIN via NWaves)
-        // Si la fréquence est différente de 44100, on crée un service ad hoc
-        var service = sampleRate == 44100
-                      ? _pitchService
-                      : new PitchDetectorService(sampleRate);
+        // Récupère ou crée un service pour ce taux d'échantillonnage
+        PitchDetectorService service;
+        if (sampleRate == 44100)
+        {
+            service = _pitchService;
+        }
+        else
+        {
+            lock (_pitchServiceCache)
+            {
+                if (!_pitchServiceCache.TryGetValue(sampleRate, out service!))
+                {
+                    service = new PitchDetectorService(sampleRate);
+                    _pitchServiceCache[sampleRate] = service;
+                }
+            }
+        }
 
         var (hz, note) = service.DetectPitch(samples);
 
@@ -244,6 +263,9 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         _engine.OnAudioFrame    -= HandleAudioFrame;
         _engine.OnMetersUpdated -= HandleMeters;
         _engine.OnLog           -= HandleEngineLog;
