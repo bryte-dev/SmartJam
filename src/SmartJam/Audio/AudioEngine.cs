@@ -255,6 +255,24 @@ public class AudioEngine
                            ? AudioClientShareMode.Exclusive
                            : AudioClientShareMode.Shared;
 
+        try
+        {
+            StartWasapiLiveCore(inputDevice, outputDevice, shareMode);
+        }
+        catch (Exception ex) when (shareMode == AudioClientShareMode.Exclusive && IsAccessDenied(ex))
+        {
+            Log("WASAPI Exclusive refusé (E_ACCESSDENIED), fallback vers WASAPI Shared.");
+            try { _capture?.Dispose(); } catch { }
+            try { _playback?.Dispose(); } catch { }
+            _capture = null;
+            _playback = null;
+            _buffer = null;
+            StartWasapiLiveCore(inputDevice, outputDevice, AudioClientShareMode.Shared);
+        }
+    }
+
+    private void StartWasapiLiveCore(MMDevice inputDevice, MMDevice outputDevice, AudioClientShareMode shareMode)
+    {
         _capture      = new WasapiCapture(inputDevice) { ShareMode = shareMode };
         _wasapiFormat = _capture.WaveFormat;
         Log($"WASAPI Live: {_wasapiFormat.Encoding} {_wasapiFormat.SampleRate} Hz {_wasapiFormat.BitsPerSample} bit ×{_wasapiFormat.Channels}");
@@ -288,6 +306,23 @@ public class AudioEngine
         var shareMode    = Driver == AudioDriver.WASAPI_Exclusive
                            ? AudioClientShareMode.Exclusive
                            : AudioClientShareMode.Shared;
+
+        try
+        {
+            StartWasapiOscillatorCore(outputDevice, shareMode);
+        }
+        catch (Exception ex) when (shareMode == AudioClientShareMode.Exclusive && IsAccessDenied(ex))
+        {
+            Log("WASAPI Exclusive refusé (E_ACCESSDENIED), fallback vers WASAPI Shared.");
+            try { _playback?.Dispose(); } catch { }
+            _playback = null;
+            _sineProvider = null;
+            StartWasapiOscillatorCore(outputDevice, AudioClientShareMode.Shared);
+        }
+    }
+
+    private void StartWasapiOscillatorCore(MMDevice outputDevice, AudioClientShareMode shareMode)
+    {
 
         // Aligner sur le format mix du périphérique pour éviter les erreurs WASAPI
         int deviceSampleRate = SampleRate;
@@ -762,6 +797,9 @@ public class AudioEngine
         _floatBuffer        = Array.Empty<float>();
         _floatBufferFromPool = false;
     }
+
+    private static bool IsAccessDenied(Exception ex)
+        => ex is UnauthorizedAccessException || ex.HResult == unchecked((int)0x80070005);
 
     private void Log(string message) => OnLog?.Invoke($"[{DateTime.Now:HH:mm:ss}] {message}");
 }
