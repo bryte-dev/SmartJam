@@ -24,6 +24,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
     private const int MaxPlayedNotes = 20;
     private const int MaxLogMessages = 150;
     private const double MinDb = -60.0;
+    private static readonly int[] MajorScaleIntervals = [0, 2, 4, 5, 7, 9, 11];
+    private static readonly int[] MinorScaleIntervals = [0, 2, 3, 5, 7, 8, 10];
+
+    private static readonly string[] CompactNoteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    private static readonly string[] FrenchNoteNames = ["Do", "Do#", "Ré", "Ré#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si"];
 
     private bool _disposed;
     private bool _isDraggingOscFrequency;
@@ -35,9 +40,13 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
     private const double OscDragStepHz = 2.0;
     private const double OscDragStepHzFast = 10.0;
 
+    private readonly List<int> _playedMidiNotes = [];
+    private int? _lastDetectedMidi;
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public IReadOnlyList<string> Modes { get; } = ["Live", "TestOscillator"];
+    public IReadOnlyList<string> NotationModes { get; } = ["Am", "La mineur"];
 
     private string _selectedMode = "TestOscillator";
     public string SelectedMode
@@ -210,6 +219,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
     public ObservableCollection<string> PlayedNotes { get; } = [];
     public ObservableCollection<string> LogMessages { get; } = [];
 
+    private string _selectedNotation = "Am";
+    public string SelectedNotation
+    {
+        get => _selectedNotation;
+        set
+        {
+            if (!SetField(ref _selectedNotation, value))
+                return;
+
+            RefreshDetectedNoteDisplay();
+            RefreshPlayedNotesDisplay();
+            UpdateHarmonyAnalysis();
+        }
+    }
+
     public IRelayCommand ToggleMonitoringCommand { get; }
     public IAsyncRelayCommand OpenSettingsCommand { get; }
     public IRelayCommand ResetPlayedNotesCommand { get; }
@@ -281,7 +305,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
 
     private void ResetPlayedNotes()
     {
+        _playedMidiNotes.Clear();
         PlayedNotes.Clear();
+        PossibleKey = "—";
+        PossibleChord = "—";
         AddLog("Historique des notes réinitialisé.");
     }
 
@@ -397,20 +424,26 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
             }
         }
 
-        var (hz, note) = service.DetectPitch(samples);
+        var (hz, _) = service.DetectPitch(samples);
 
         Dispatcher.UIThread.Post(() =>
         {
             if (hz > 0)
             {
-                DetectedFrequency = $"{hz:F2} Hz";
-                DetectedNote = note;
+                int midi = HzToMidi(hz);
+                _lastDetectedMidi = midi;
 
-                if (PlayedNotes.Count == 0 || PlayedNotes[0] != note)
+                DetectedFrequency = $"{hz:F2} Hz";
+                DetectedNote = FormatNoteWithOctave(midi);
+
+                if (_playedMidiNotes.Count == 0 || _playedMidiNotes[0] != midi)
                 {
-                    PlayedNotes.Insert(0, note);
-                    if (PlayedNotes.Count > MaxPlayedNotes)
-                        PlayedNotes.RemoveAt(PlayedNotes.Count - 1);
+                    _playedMidiNotes.Insert(0, midi);
+                    if (_playedMidiNotes.Count > MaxPlayedNotes)
+                        _playedMidiNotes.RemoveAt(_playedMidiNotes.Count - 1);
+
+                    RefreshPlayedNotesDisplay();
+                    UpdateHarmonyAnalysis();
                 }
             }
             else
@@ -445,6 +478,133 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
         };
         SampleRateLabel = $"{_engine.SampleRate} Hz";
         BufferSizeLabel = _engine.BufferSize.ToString();
+    }
+
+    private void RefreshDetectedNoteDisplay()
+    {
+        if (_lastDetectedMidi.HasValue)
+            DetectedNote = FormatNoteWithOctave(_lastDetectedMidi.Value);
+    }
+
+    private void RefreshPlayedNotesDisplay()
+    {
+        PlayedNotes.Clear();
+        foreach (int midi in _playedMidiNotes)
+            PlayedNotes.Add(FormatNoteWithOctave(midi));
+    }
+
+    private void UpdateHarmonyAnalysis()
+    {
+        if (_playedMidiNotes.Count == 0)
+        {
+            PossibleKey = "—";
+            PossibleChord = "—";
+            return;
+        }
+
+        var pitchClassCounts = new int[12];
+        foreach (int midi in _playedMidiNotes)
+            pitchClassCounts[PositiveModulo(midi, 12)]++;
+
+        int bestKeyRoot = 0;
+        bool bestKeyMinor = false;
+        int bestKeyScore = int.MinValue;
+
+        for (int root = 0; root < 12; root++)
+        {
+            int majorScore = ScoreScale(root, MajorScaleIntervals, pitchClassCounts);
+            if (majorScore > bestKeyScore)
+            {
+                bestKeyScore = majorScore;
+                bestKeyRoot = root;
+                bestKeyMinor = false;
+            }
+
+            int minorScore = ScoreScale(root, MinorScaleIntervals, pitchClassCounts);
+            if (minorScore > bestKeyScore)
+            {
+                bestKeyScore = minorScore;
+                bestKeyRoot = root;
+                bestKeyMinor = true;
+            }
+        }
+
+        PossibleKey = FormatHarmonyName(bestKeyRoot, bestKeyMinor);
+
+        int bestChordRoot = 0;
+        bool bestChordMinor = false;
+        int bestChordScore = int.MinValue;
+
+        for (int root = 0; root < 12; root++)
+        {
+            int majorScore = ScoreChord(root, minor: false, pitchClassCounts);
+            if (majorScore > bestChordScore)
+            {
+                bestChordScore = majorScore;
+                bestChordRoot = root;
+                bestChordMinor = false;
+            }
+
+            int minorScore = ScoreChord(root, minor: true, pitchClassCounts);
+            if (minorScore > bestChordScore)
+            {
+                bestChordScore = minorScore;
+                bestChordRoot = root;
+                bestChordMinor = true;
+            }
+        }
+
+        PossibleChord = FormatHarmonyName(bestChordRoot, bestChordMinor);
+    }
+
+    private static int ScoreScale(int root, int[] intervals, int[] counts)
+    {
+        int score = 0;
+        for (int i = 0; i < intervals.Length; i++)
+            score += counts[PositiveModulo(root + intervals[i], 12)];
+        return score;
+    }
+
+    private static int ScoreChord(int root, bool minor, int[] counts)
+    {
+        int thirdInterval = minor ? 3 : 4;
+        int score = 0;
+        score += counts[PositiveModulo(root, 12)] * 4;
+        score += counts[PositiveModulo(root + thirdInterval, 12)] * 3;
+        score += counts[PositiveModulo(root + 7, 12)] * 2;
+        return score;
+    }
+
+    private string FormatHarmonyName(int noteClass, bool minor)
+    {
+        bool compact = SelectedNotation == "Am";
+        string root = compact ? CompactNoteNames[noteClass] : FrenchNoteNames[noteClass];
+
+        if (compact)
+            return minor ? $"{root}m" : root;
+
+        string quality = minor ? "mineur" : "majeur";
+        return $"{root} {quality}";
+    }
+
+    private string FormatNoteWithOctave(int midi)
+    {
+        int noteClass = PositiveModulo(midi, 12);
+        int octave = midi / 12 - 1;
+        string noteName = SelectedNotation == "Am" ? CompactNoteNames[noteClass] : FrenchNoteNames[noteClass];
+        return $"{noteName}{octave}";
+    }
+
+    private static int HzToMidi(float hz)
+    {
+        double midi = 12.0 * Math.Log2(hz / 440.0) + 69.0;
+        return (int)Math.Round(midi);
+    }
+
+    private static int PositiveModulo(int value, int modulo)
+    {
+        int result = value % modulo;
+        return result < 0 ? result + modulo : result;
     }
 
     private static double ToDb(float value)
