@@ -201,7 +201,10 @@
 
                     <Border Classes="panel" Width="520" MaxWidth="720" MinHeight="360">
                         <StackPanel Spacing="8">
-                            <TextBlock Classes="section-title" Text="JOURNAL" Margin="0 0 0 6"/>
+                            <Grid ColumnDefinitions="*,Auto" Margin="0 0 0 6">
+                                <TextBlock Classes="section-title" Text="JOURNAL" Margin="0"/>
+                                <Button Grid.Column="1" Classes="secondary" Content="Copier" Command="{Binding CopyLogsCommand}"/>
+                            </Grid>
                             <ListBox ItemsSource="{Binding LogMessages}" Height="320" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>

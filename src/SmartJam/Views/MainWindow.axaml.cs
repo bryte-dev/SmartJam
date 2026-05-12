@@ -7,6 +7,7 @@ using Avalonia.Input;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Threading;
+using Avalonia.Input.Platform;
 using CommunityToolkit.Mvvm.Input;
 using SmartJam.Audio;
 using SmartJam.Services;
@@ -23,6 +24,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
     private const int AnalysisWindowSize = 4096;
     private const int MaxPlayedNotes = 20;
     private const int MaxLogMessages = 150;
+    private const float SilenceGateRms = 0.008f;
+    private const int MinStableDetections = 2;
     private const double MinDb = -60.0;
     private static readonly int[] MajorScaleIntervals = [0, 2, 4, 5, 7, 9, 11];
     private static readonly int[] MinorScaleIntervals = [0, 2, 3, 5, 7, 8, 10];
@@ -42,6 +45,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
 
     private readonly List<int> _playedMidiNotes = [];
     private int? _lastDetectedMidi;
+    private int? _candidateMidi;
+    private int _candidateMidiHits;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -237,6 +242,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
     public IRelayCommand ToggleMonitoringCommand { get; }
     public IAsyncRelayCommand OpenSettingsCommand { get; }
     public IRelayCommand ResetPlayedNotesCommand { get; }
+    public IAsyncRelayCommand CopyLogsCommand { get; }
 
     public MainWindow()
     {
@@ -245,6 +251,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
         ToggleMonitoringCommand = new RelayCommand(ToggleMonitoring);
         OpenSettingsCommand = new AsyncRelayCommand(OpenSettingsAsync);
         ResetPlayedNotesCommand = new RelayCommand(ResetPlayedNotes);
+        CopyLogsCommand = new AsyncRelayCommand(CopyLogsAsync);
 
         DataContext = this;
 
@@ -272,8 +279,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
         try
         {
             _engine.StartMonitoring();
-            IsMonitoring = true;
-            MonitoringButtonText = "Monitoring OFF";
+
+            if (_engine.IsMonitoring)
+            {
+                IsMonitoring = true;
+                MonitoringButtonText = "Monitoring OFF";
+            }
+            else
+            {
+                IsMonitoring = false;
+                MonitoringButtonText = "Monitoring ON";
+                AddLog(_engine.LastStartError ?? "Impossible de démarrer le monitoring audio.");
+            }
         }
         catch (Exception ex)
         {
@@ -407,6 +424,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
 
     private void RunPitchDetection(float[] samples, int sampleRate)
     {
+        float rms = ComputeRms(samples);
+
+        if (rms < SilenceGateRms)
+        {
+            _candidateMidi = null;
+            _candidateMidiHits = 0;
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                DetectedFrequency = "— Hz";
+                DetectedNote = "—";
+            });
+            return;
+        }
+
         PitchDetectorService service;
         if (sampleRate == 44100)
         {
@@ -431,14 +463,26 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
             if (hz > 0)
             {
                 int midi = HzToMidi(hz);
-                _lastDetectedMidi = midi;
+
+                if (_candidateMidi == midi)
+                    _candidateMidiHits++;
+                else
+                {
+                    _candidateMidi = midi;
+                    _candidateMidiHits = 1;
+                }
+
+                if (_candidateMidiHits < MinStableDetections)
+                    return;
+
+                _lastDetectedMidi = _candidateMidi;
 
                 DetectedFrequency = $"{hz:F2} Hz";
-                DetectedNote = FormatNoteWithOctave(midi);
+                DetectedNote = FormatNoteWithOctave(_lastDetectedMidi.Value);
 
-                if (_playedMidiNotes.Count == 0 || _playedMidiNotes[0] != midi)
+                if (_playedMidiNotes.Count == 0 || _playedMidiNotes[0] != _lastDetectedMidi.Value)
                 {
-                    _playedMidiNotes.Insert(0, midi);
+                    _playedMidiNotes.Insert(0, _lastDetectedMidi.Value);
                     if (_playedMidiNotes.Count > MaxPlayedNotes)
                         _playedMidiNotes.RemoveAt(_playedMidiNotes.Count - 1);
 
@@ -448,10 +492,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
             }
             else
             {
+                _candidateMidi = null;
+                _candidateMidiHits = 0;
                 DetectedFrequency = "— Hz";
                 DetectedNote = "—";
             }
         });
+    }
+
+    private static float ComputeRms(float[] samples)
+    {
+        if (samples.Length == 0)
+            return 0f;
+
+        double sum = 0;
+        for (int i = 0; i < samples.Length; i++)
+        {
+            float s = samples[i];
+            sum += s * s;
+        }
+
+        return (float)Math.Sqrt(sum / samples.Length);
     }
 
     private void ApplyEngineSettings()
@@ -463,9 +524,27 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
 
     private void AddLog(string message)
     {
-        LogMessages.Insert(0, message);
+        string formatted = message.StartsWith("[", StringComparison.Ordinal)
+            ? message
+            : $"[{DateTime.Now:HH:mm:ss}] {message}";
+
+        LogMessages.Insert(0, formatted);
         while (LogMessages.Count > MaxLogMessages)
             LogMessages.RemoveAt(LogMessages.Count - 1);
+    }
+
+    private async Task CopyLogsAsync()
+    {
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard == null)
+        {
+            AddLog("Copie impossible : presse-papiers indisponible.");
+            return;
+        }
+
+        string text = string.Join(Environment.NewLine, LogMessages);
+        await clipboard.SetValueAsync(DataFormat.Text, text);
+        AddLog("Journal copié dans le presse-papiers.");
     }
 
     private void RefreshSettingsLabels()

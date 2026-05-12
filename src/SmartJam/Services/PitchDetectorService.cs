@@ -21,7 +21,7 @@ public class PitchDetectorService
     private readonly int _sampleRate;
 
     // Fréquences limites : en dehors, le pitch est ignoré
-    private const float MinHz = 60f;
+    private const float MinHz = 35f;
     private const float MaxHz = 1200f;
 
     // Seuil CMDF YIN (0.15 = bon équilibre précision/bruit)

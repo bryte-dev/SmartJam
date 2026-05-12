@@ -103,6 +103,7 @@ public class AudioEngine
     // ── État ─────────────────────────────────────────────────────────────────
 
     public bool  IsMonitoring  { get; private set; }
+    public string? LastStartError { get; private set; }
     public float Level         { get; private set; }
     public float PeakLevel     { get; private set; }
     public bool  CpuOverload   { get; private set; }
@@ -186,6 +187,8 @@ public class AudioEngine
     {
         try
         {
+            LastStartError = null;
+
             if (Driver == AudioDriver.ASIO)
                 StartAsio();
             else
@@ -196,7 +199,13 @@ public class AudioEngine
         }
         catch (Exception ex)
         {
-            Log("[AudioEngine] Start error: " + ex.Message);
+            string details = FormatExceptionDetails(ex);
+            string target = Driver == AudioDriver.ASIO
+                ? $"ASIO '{_asioDriverName ?? "(non sélectionné)"}'"
+                : Driver.ToString();
+
+            LastStartError = $"Impossible de démarrer l'audio ({target}). {details}";
+            Log("[AudioEngine] Start error: " + LastStartError);
             StopAudio();
         }
     }
@@ -504,7 +513,11 @@ public class AudioEngine
             }
             return (0, 0);
         }
-        catch (Exception ex) { Log($"ProbeAsio failed: {ex.Message}"); return (0, 0); }
+        catch (Exception ex)
+        {
+            Log($"ProbeAsio failed ('{driverName}'): {FormatExceptionDetails(ex)}");
+            return (0, 0);
+        }
     }
 
     private void StartAsio()
@@ -800,6 +813,17 @@ public class AudioEngine
 
     private static bool IsAccessDenied(Exception ex)
         => ex is UnauthorizedAccessException || ex.HResult == unchecked((int)0x80070005);
+
+    private static string FormatExceptionDetails(Exception ex)
+    {
+        string message = string.IsNullOrWhiteSpace(ex.Message) ? "message d'erreur vide" : ex.Message;
+        string hresult = $"0x{ex.HResult:X8}";
+
+        if (ex.InnerException != null && !string.IsNullOrWhiteSpace(ex.InnerException.Message))
+            return $"{message} ({ex.GetType().Name}, HRESULT={hresult}, Inner={ex.InnerException.Message})";
+
+        return $"{message} ({ex.GetType().Name}, HRESULT={hresult})";
+    }
 
     private void Log(string message) => OnLog?.Invoke($"[{DateTime.Now:HH:mm:ss}] {message}");
 }
