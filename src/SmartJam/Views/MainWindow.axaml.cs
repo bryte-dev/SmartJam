@@ -48,7 +48,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
     private int? _candidateMidi;
     private int _candidateMidiHits;
 
-    public event PropertyChangedEventHandler? PropertyChanged;
+    public new event PropertyChangedEventHandler? PropertyChanged;
 
     public IReadOnlyList<string> Modes { get; } = ["Live", "TestOscillator"];
     public IReadOnlyList<string> NotationModes { get; } = ["Am", "La mineur"];

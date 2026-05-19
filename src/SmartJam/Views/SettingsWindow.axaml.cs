@@ -1,5 +1,4 @@
 using Avalonia.Controls;
-using SmartJam.ViewModels;
 
 namespace SmartJam.Views;
 

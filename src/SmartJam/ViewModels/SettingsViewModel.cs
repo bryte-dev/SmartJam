@@ -10,14 +10,14 @@ namespace SmartJam.ViewModels;
 /// ViewModel de la fenêtre de paramètres audio.
 /// Expose les listes de drivers/périphériques et permet d'appliquer la configuration à l'AudioEngine.
 /// </summary>
-public partial class SettingsViewModel : ViewModelBase
+public partial class SettingsViewModel : ObservableObject
 {
     private readonly AudioEngine _engine;
 
     // ── Drivers ──────────────────────────────────────────────────────────────
 
     public IReadOnlyList<string> AudioDrivers { get; } =
-        ["WASAPI Shared", "WASAPI Exclusive", "ASIO"];
+        new List<string> { "WASAPI Shared", "WASAPI Exclusive", "ASIO" };
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsWasapiSelected))]
