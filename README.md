@@ -1,156 +1,144 @@
-# SmartJam 🎸
+# SmartJam
 
-Application de **détection de pitch en temps réel** développée dans le cadre du TPI.  
-Elle capture l'audio (interface ASIO / WASAPI) ou génère un sinus interne, détecte la note jouée et affiche les résultats dans une interface Avalonia.
+SmartJam est une application de **détection de note en temps réel** réalisée dans le cadre du TPI.  
+Elle permet d’analyser un signal audio, d’estimer la fréquence jouée, puis d’afficher la note correspondante dans une interface graphique.
+
+L’application peut fonctionner de deux façons :
+- avec un **oscillateur de test interne**, pour vérifier le fonctionnement sans matériel externe ;
+- avec une **entrée audio réelle**, via une interface audio ou un microphone compatible.
 
 ---
 
-## Structure du projet
+## Objectif du projet
 
-```
-SmartJam/
-├── SmartJam.slnx                    # Solution .NET (ouvrir dans VS / Rider)
-│
-├── poc/
-│   ├── PocPitch/                    # POC offline : détection YIN sur sinus ou WAV
-│   └── PocAccompaniment/            # POC : progression d'accords + export MIDI
-│
-├── src/
-│   └── SmartJam/                    # Application principale Avalonia MVVM
-│       ├── Audio/
-│       │   ├── AudioEngine.cs       # Moteur audio (WASAPI / ASIO) — adapté d'AudioBlocks
-│       │   └── SineWaveProvider.cs  # Oscillateur sinus (ISampleProvider NAudio)
-│       ├── Services/
-│       │   ├── PitchDetectorService.cs         # Détection YIN (NWaves)
-│       │   ├── AccompanimentGeneratorService.cs # Génération d'accords (placeholder)
-│       │   └── SineAudioSource.cs              # Source offline (offline uniquement)
-│       ├── ViewModels/
-│       │   └── MainWindowViewModel.cs  # ViewModel principal (MVVM)
-│       └── Views/
-│           └── MainWindow.axaml        # Interface Avalonia
-│
-├── assets/
-│   └── wav/
-│       ├── A4_440Hz_3s.wav          # Fichier WAV de test (440 Hz, 3 s)
-│       └── generate_test_wav.py     # Script pour regénérer le WAV
-│
-└── docs/
-    └── tpi/
-        ├── B5_processus_metier.md
-        ├── G9_concept_realisation.md
-        └── G12_tests.md
-```
+Le but de SmartJam est de proposer un outil capable de :
+- capter un signal audio ;
+- détecter la hauteur dominante ;
+- afficher la fréquence et la note associée ;
+- fournir quelques informations musicales complémentaires, comme un historique des notes détectées.
 
 ---
 
 ## Prérequis
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download) — vérifier : `dotnet --version`
-- Windows 10 / 11 (NAudio WASAPI / ASIO est Windows uniquement)
-- Optionnel : Visual Studio 2022 / JetBrains Rider / VS Code + extension C#
-- Pour le mode Live : interface audio (ex. Arturia MiniFuse 2) avec driver ASIO installé
+Pour utiliser SmartJam, il faut :
 
----
+- **Windows 10 ou 11**
+- **.NET 10 SDK**
+- éventuellement une **interface audio** si l’on souhaite tester le mode entrée réelle
+- de préférence un pilote audio correct si un périphérique externe est utilisé
 
-## Build
+Pour vérifier que .NET est installé :
 
 ```bash
-# Build de toute la solution
-dotnet build SmartJam.slnx
-
-# Build uniquement l'application principale
-dotnet build src/SmartJam/SmartJam.csproj
+dotnet --version
 ```
 
 ---
 
-## Lancer l'application principale
+## Lancer l’application
+
+Depuis la racine du projet :
 
 ```bash
 cd src/SmartJam
 dotnet run
 ```
 
-L'application démarre avec le mode **TestOscillator** (pas besoin de matériel) :
-
-1. Le mode **TestOscillator** est sélectionné par défaut.
-2. Régler la fréquence (ex. `440 Hz` → note A4) et l'amplitude.
-3. Cliquer sur **Monitoring ON** → le sinus joue et le pitch est détecté en temps réel.
-4. Passer en mode **Live** + **Monitoring ON** pour utiliser une vraie interface audio.
-5. **Settings** (placeholder) → permettra de choisir le driver ASIO et les périphériques.
+L’application démarre ensuite dans sa fenêtre principale.
 
 ---
 
-## Lancer les POC (tests offline, sans matériel)
+## Utilisation rapide
 
-### POC Pitch
+### 1. Mode test avec oscillateur interne
+Ce mode permet de tester l’application sans brancher d’instrument.
 
-```bash
-cd poc/PocPitch
+- lancer l’application ;
+- vérifier que le mode **TestOscillator** est sélectionné ;
+- régler la fréquence souhaitée, par exemple **440 Hz** ;
+- cliquer sur **Monitoring ON** ;
+- observer la fréquence détectée et la note affichée.
 
-# Sinus à 440 Hz (devrait détecter A4)
-dotnet run -- --source sine --freq 440
+Exemple :
+- **440 Hz** doit correspondre à **A4**
+- **110 Hz** doit correspondre à **A2**
 
-# Depuis un fichier WAV
-dotnet run -- --source wav --path ../../assets/wav/A4_440Hz_3s.wav
-```
-
-### POC Accompagnement
-
-```bash
-cd poc/PocAccompaniment
-
-# Pop en Do, 8 mesures, 120 BPM
-dotnet run -- --key C --style pop --bars 8 --tempo 120
-```
+Ce mode est utile pour vérifier rapidement que la détection fonctionne correctement.
 
 ---
 
-## Architecture audio
+### 2. Mode entrée audio réelle
+Ce mode permet d’utiliser un signal venant d’un périphérique audio.
 
-```
-Mode Live (WASAPI / ASIO)
-  WasapiCapture / AsioOut (input)
-      │ float[] mono
-      ├─→ BufferedWaveProvider → WasapiOut (monitoring — l'utilisateur entend ce qu'il joue)
-      ├─→ UpdateMeters() → RMS / Peak → UI
-      └─→ OnAudioFrame(samples, frames, sampleRate)
-              └─→ PitchDetectorService (YIN) → Hz + Note → UI
+- sélectionner le mode **Live** ;
+- vérifier que l’entrée audio est correctement configurée ;
+- activer **Monitoring ON** si nécessaire ;
+- jouer une note propre et stable ;
+- observer la note détectée dans l’interface.
 
-Mode TestOscillator (WASAPI)
-  SineWaveProvider (sinus interne)
-      │ float[] mono
-      ├─→ WasapiOut (l'utilisateur entend le sinus)
-      ├─→ UpdateMeters() → RMS / Peak → UI
-      └─→ OnAudioFrame(samples, frames, sampleRate)
-              └─→ PitchDetectorService (YIN) → Hz + Note → UI
-```
+Ce mode dépend du matériel utilisé, du pilote audio disponible et de la qualité du signal entrant.
+
+---
+
+## Réglages principaux
+
+L’interface permet notamment de :
+
+- choisir le mode de fonctionnement ;
+- activer ou désactiver le monitoring ;
+- visualiser le niveau du signal ;
+- afficher la fréquence détectée ;
+- afficher la note correspondante ;
+- consulter un historique récent des notes jouées.
+
+Selon la version utilisée, certains réglages audio plus avancés peuvent également être disponibles.
+
+---
+
+## Conseils d’utilisation
+
+Pour obtenir de meilleurs résultats :
+
+- jouer une note isolée et stable ;
+- éviter les bruits parasites ;
+- utiliser un niveau d’entrée suffisant, sans saturation ;
+- tester d’abord avec l’oscillateur interne avant de passer à une entrée réelle.
+
+---
+
+## Tests simples à effectuer
+
+Quelques essais rapides permettent de vérifier le bon fonctionnement de l’application :
+
+- **440 Hz** avec l’oscillateur interne → note attendue : **A4**
+- **110 Hz** avec l’oscillateur interne → note attendue : **A2**
+- jeu d’une note simple sur une basse ou un autre instrument monophonique → détection visuellement cohérente
+
+---
+
+## Structure générale du projet
+
+Le projet contient :
+
+- l’application principale **SmartJam**
+- des dossiers de test et de preuve de concept
+- des ressources de test audio
+- une documentation liée au TPI
 
 ---
 
 ## Bibliothèques utilisées
 
-| Lib | Usage | Lien |
-|-----|-------|------|
-| **NAudio** v2.2.1 | Moteur audio (WASAPI, ASIO, BufferedWaveProvider) | https://github.com/naudio/NAudio |
-| **NWaves** v0.9.6 | Algorithme YIN (pitch detection) | https://github.com/ar1st0crat/NWaves |
-| **Avalonia** v12.0.1 | Interface graphique (Windows) | https://github.com/AvaloniaUI/Avalonia |
-| **CommunityToolkit.Mvvm** v8.4.1 | MVVM (ObservableProperty, RelayCommand) | https://github.com/CommunityToolkit/dotnet |
-| **Melanchall.DryWetMidi** v8.0.3 | Export MIDI (POC accompagnement) | https://github.com/melanchall/drywetmidi |
+SmartJam s’appuie notamment sur les outils suivants :
+
+- **NAudio** pour la gestion audio ;
+- **NWaves** pour l’analyse du signal et la détection de pitch ;
+- **Avalonia** pour l’interface graphique.
 
 ---
 
-## Checklist de complétion
+## Remarque
 
-- [x] Structure repo : `poc/PocPitch`, `poc/PocAccompaniment`, `src/SmartJam`, `assets/`, `docs/`
-- [x] Solution racine `SmartJam.slnx`
-- [x] POC Pitch : sinus + WAV + NWaves YIN + logs Hz + note
-- [x] POC Accompagnement : progression d'accords + export MIDI + README
-- [x] **AudioEngine** : WASAPI / ASIO, monitoring, RMS/Peak, `OnAudioFrame` (adapté d'AudioBlocks)
-- [x] **SineWaveProvider** : oscillateur sinus (mode TestOscillator)
-- [x] **UI Avalonia** : Mode dropdown, OscParams, RMS bar, Monitoring ON/OFF, Settings, Freq+Note, Key/Chord, Historique, Log
-- [x] **ViewModel** : binding AudioEngine, pitch en temps réel, historique notes, log
-- [x] README racine : structure, build, run, architecture audio
-- [ ] Service MusicAnalyzerService (estimation tonalité depuis notes accumulées)
-- [ ] Modale Settings (sélection driver ASIO / WASAPI + périphériques)
-
+SmartJam est un prototype fonctionnel centré sur l’analyse de note en temps réel.  
+Certaines idées envisagées au départ, comme une génération d’accompagnement plus poussée, n’ont pas été entièrement intégrées dans cette version.
