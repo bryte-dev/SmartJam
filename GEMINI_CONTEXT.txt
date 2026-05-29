@@ -1,0 +1,2574 @@
+## 1. PROJECT METADATA
+- Repo: bryte-dev/SmartJam
+- Description: Projet de TPI — Application d'analyse de notes et génération d'accompagnement musical
+- Language: C# 100%
+- Framework: .NET 10, WinExe
+- Created: ~May 2026
+- Last commit: 2026-05-19 — "cleaned code and deleted useless files"
+
+## 2. TECH STACK
+- UI: Avalonia 12.0.1 (FluentTheme, CompiledBindings, Inter font)
+- MVVM: CommunityToolkit.Mvvm 8.4.1
+- Audio I/O: NAudio 2.2.1 (WASAPI Shared/Exclusive + ASIO)
+- DSP/Pitch: NWaves 0.9.6 (YIN algorithm)
+- Target: Windows 10/11, AllowUnsafeBlocks=true
+
+## 3. PROJECT STRUCTURE (full file tree)
+```
+SmartJam/
+├── README.md
+├── SmartJam.slnx
+├── .gitignore
+└── src/
+    └── SmartJam/
+        ├── SmartJam.csproj
+        ├── Program.cs (not retrieved, standard Avalonia entry point)
+        ├── App.axaml / App.axaml.cs
+        ├── app.manifest
+        ├── Assets/
+        ├── Audio/
+        │   ├── AudioEngine.cs       ← moteur principal (830 lines)
+        │   └── SineWaveProvider.cs  ← oscillateur de test (50 lines)
+        ├── Services/
+        │   ├── PitchDetectorService.cs          ← YIN pitch detection (73 lines)
+        │   ├── AccompanimentGeneratorService.cs ← chord progression gen (76 lines)
+        │   └── SineAudioSource.cs               ← offline sine gen (27 lines)
+        ├── ViewModels/
+        │   └── SettingsViewModel.cs ← audio settings MVVM (255 lines)
+        └── Views/
+            ├── MainWindow.axaml     ← UI layout (223 lines)
+            ├── MainWindow.axaml.cs  ← main logic (745 lines)
+            ├── SettingsWindow.axaml
+            └── SettingsWindow.axaml.cs
+```
+
+## 4. FULL SOURCE CODE OF EVERY FILE
+
+Include the complete source code of each file below, with a clear header for each. Use the exact code from the repo:
+
+
+### FILE: src/SmartJam/Audio/AudioEngine.cs
+```csharp
+using NAudio.CoreAudioApi;
+using NAudio.Wave;
+using NAudio.Wave.Asio;
+using NAudio.Wave.SampleProviders;
+using System.Buffers;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace SmartJam.Audio;
+
+/// <summary>Driver audio à utiliser.</summary>
+public enum AudioDriver
+{
+    WASAPI_Shared,
+    WASAPI_Exclusive,
+    ASIO
+}
+
+/// <summary>Mode de source audio.</summary>
+public enum AudioMode
+{
+    /// <summary>Capture depuis le périphérique d'entrée sélectionné (micro / interface).</summary>
+    Live,
+    /// <summary>Génère un sinus interne pour tester sans matériel.</summary>
+    TestOscillator
+}
+
+/// <summary>Fournisseur silence (IWaveProvider) — utilisé pour l'init ASIO.</summary>
+internal class SilenceProvider : IWaveProvider
+{
+    public WaveFormat WaveFormat { get; }
+    public SilenceProvider(int sampleRate, int channels)
+        => WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, channels);
+    public int Read(byte[] buffer, int offset, int count)
+    { Array.Clear(buffer, offset, count); return count; }
+}
+
+/// <summary>
+/// Moteur audio SmartJam — adapté de AudioBlocks.App.Audio.AudioEngine.
+///
+/// Supprimé  : Effects, Recorder, Metronome.
+/// Conservé  : monitoring WASAPI/ASIO (BufferedWaveProvider + WasapiOut / AsioOut).
+/// Ajouté    : AudioMode (Live / TestOscillator), OnAudioFrame, OscillatorFrequency/Amplitude.
+/// </summary>
+public class AudioEngine
+{
+    // ── Configuration ────────────────────────────────────────────────────────
+
+    public AudioDriver Driver   { get; set; } = AudioDriver.WASAPI_Shared;
+    public AudioMode   Mode     { get; set; } = AudioMode.TestOscillator;
+    public MMDevice?   InputDevice  { get; set; }
+    public MMDevice?   OutputDevice { get; set; }
+    public int SampleRate  { get; set; } = 44100;
+    public int BufferSize  { get; set; } = 256;
+
+    // ── Oscillateur (mode TestOscillator) ────────────────────────────────────
+
+    private float _oscFrequency = 440f;
+    private float _oscAmplitude = 0.6f;
+
+    /// <summary>Fréquence du sinus de test (Hz). Mise à jour en temps réel si le moteur tourne.</summary>
+    public float OscillatorFrequency
+    {
+        get => _oscFrequency;
+        set
+        {
+            _oscFrequency = value;
+            if (_sineProvider != null) _sineProvider.Frequency = value;
+        }
+    }
+
+    /// <summary>Amplitude du sinus de test [0..1]. Mise à jour en temps réel.</summary>
+    public float OscillatorAmplitude
+    {
+        get => _oscAmplitude;
+        set
+        {
+            _oscAmplitude = value;
+            if (_sineProvider != null) _sineProvider.Amplitude = value;
+        }
+    }
+
+    // ── Événements ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Déclenché à chaque trame audio. Paramètres : (samples, frameCount, sampleRate).
+    /// Sera utilisé par le détecteur de pitch.
+    /// </summary>
+    public event Action<float[], int, int>? OnAudioFrame;
+
+    /// <summary>Niveaux RMS et Peak mis à jour. Paramètres : (rms, peak).</summary>
+    public event Action<float, float>? OnMetersUpdated;
+
+    /// <summary>Message de log émis par le moteur.</summary>
+    public event Action<string>?        OnLog;
+
+    /// <summary>Changement d'état du monitoring.</summary>
+    public event Action<bool>?          OnMonitoringChanged;
+
+    /// <summary>Surcharge CPU détectée.</summary>
+    public event Action<bool>?          OnCpuOverloadChanged;
+
+    // ── État ─────────────────────────────────────────────────────────────────
+
+    public bool  IsMonitoring  { get; private set; }
+    public string? LastStartError { get; private set; }
+    public float Level         { get; private set; }
+    public float PeakLevel     { get; private set; }
+    public bool  CpuOverload   { get; private set; }
+    public double SmoothedProcessingMs => _processingEmaMs;
+
+    // ── Objets NAudio — WASAPI ────────────────────────────────────────────────
+
+    private WasapiCapture?        _capture;
+    private IWavePlayer?          _playback;
+    private BufferedWaveProvider? _buffer;
+    private WaveFormat?           _wasapiFormat;
+    private SineWaveProvider?     _sineProvider;
+
+    // ── Objets NAudio — ASIO ─────────────────────────────────────────────────
+
+    private string?  _asioDriverName;
+    private AsioOut? _asio;
+    private int _asioInputOffset, _asioOutputOffset;
+    private int _asioInputCount = 1, _asioOutputCount = 2;
+
+    // Ton de test ASIO — accès inter-threads via Interlocked / Volatile → pas besoin de volatile
+    private bool _testActive;
+    private int  _testRemainingSamples;
+    private double _testPhase;
+    private float  _testFrequency = 440f;
+    private float  _testAmplitude = 0.6f;
+
+    // ── Buffer flottant partagé ───────────────────────────────────────────────
+
+    private float[]  _floatBuffer       = Array.Empty<float>();
+    private bool     _floatBufferFromPool;
+    private readonly ArrayPool<float> _pool = ArrayPool<float>.Shared;
+
+    // ── Performances ─────────────────────────────────────────────────────────
+
+    private readonly Stopwatch _processingTimer = new();
+    private double _processingEmaMs;
+    private readonly double _emaAlpha = 0.2;
+
+    private float _peakHold;
+    private int   _peakHoldSamples;
+    private const int PeakHoldDuration = 48000; // ~1 s à 48 kHz
+
+    // ── Énumération des périphériques ─────────────────────────────────────────
+
+    public List<MMDevice> GetInputDevices()
+        => new MMDeviceEnumerator().EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active).ToList();
+
+    public List<MMDevice> GetOutputDevices()
+        => new MMDeviceEnumerator().EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
+
+    public static List<string> GetAsioDrivers()
+        => AsioOut.GetDriverNames().ToList();
+
+    public void SetAsioDriver(string driverName)    => _asioDriverName = driverName;
+
+    public void SetAsioRouting(int inputOffset, int outputOffset, int inputCount, int outputCount)
+    {
+        _asioInputOffset  = Math.Max(0, inputOffset);
+        _asioOutputOffset = Math.Max(0, outputOffset);
+        _asioInputCount   = Math.Max(1, inputCount);
+        _asioOutputCount  = Math.Max(1, outputCount);
+    }
+
+    public (int inputOffset, int outputOffset, int inputCount, int outputCount) GetAsioRouting()
+        => (_asioInputOffset, _asioOutputOffset, _asioInputCount, _asioOutputCount);
+
+    // ── Cycle de vie ─────────────────────────────────────────────────────────
+
+    public void StartMonitoring() { if (!IsMonitoring) StartAudio(); }
+    public void StopMonitoring()  { if  (IsMonitoring) StopAudio();  }
+
+    public void RebuildAudioGraph()
+    {
+        bool wasRunning = IsMonitoring;
+        StopAudio();
+        if (wasRunning) StartAudio();
+    }
+
+    public void StartAudio()
+    {
+        try
+        {
+            LastStartError = null;
+
+            if (Driver == AudioDriver.ASIO)
+                StartAsio();
+            else
+                StartWasapi();
+
+            IsMonitoring = true;
+            OnMonitoringChanged?.Invoke(true);
+        }
+        catch (Exception ex)
+        {
+            string details = FormatExceptionDetails(ex);
+            string target = Driver == AudioDriver.ASIO
+                ? $"ASIO '{_asioDriverName ?? "(non sélectionné)"}'"
+                : Driver.ToString();
+
+            LastStartError = $"Impossible de démarrer l'audio ({target}). {details}";
+            Log("[AudioEngine] Start error: " + LastStartError);
+            StopAudio();
+        }
+    }
+
+    public void StopAudio()
+    {
+        try { _capture?.StopRecording(); }  catch { }
+        try { _playback?.Stop();         }  catch { }
+        try { _asio?.Stop();             }  catch { }
+
+        if (_capture != null)
+        {
+            try { _capture.DataAvailable -= OnWasapiData; } catch { }
+        }
+        if (_asio != null)
+        {
+            try { _asio.AudioAvailable -= OnAsioAudioAvailable; } catch { }
+        }
+        if (_sineProvider != null)
+        {
+            try { _sineProvider.SamplesGenerated -= OnOscillatorSamples; } catch { }
+        }
+
+        try { _capture?.Dispose();  } catch { }
+        try { _playback?.Dispose(); } catch { }
+        try { _asio?.Dispose();     } catch { }
+
+        _capture      = null;
+        _playback     = null;
+        _asio         = null;
+        _buffer       = null;
+        _wasapiFormat = null;
+        _sineProvider = null;
+
+        ReturnFloatBuffer();
+
+        IsMonitoring = false;
+        OnMonitoringChanged?.Invoke(false);
+    }
+
+    // ── WASAPI ───────────────────────────────────────────────────────────────
+
+    private void StartWasapi()
+    {
+        if (Mode == AudioMode.TestOscillator)
+            StartWasapiOscillator();
+        else
+            StartWasapiLive();
+    }
+
+    private void StartWasapiLive()
+    {
+        var inputDevice  = InputDevice  ?? new MMDeviceEnumerator().GetDefaultAudioEndpoint(DataFlow.Capture,  Role.Multimedia);
+        var outputDevice = OutputDevice ?? new MMDeviceEnumerator().GetDefaultAudioEndpoint(DataFlow.Render,    Role.Multimedia);
+        var shareMode    = Driver == AudioDriver.WASAPI_Exclusive
+                           ? AudioClientShareMode.Exclusive
+                           : AudioClientShareMode.Shared;
+
+        try
+        {
+            StartWasapiLiveCore(inputDevice, outputDevice, shareMode);
+        }
+        catch (Exception ex) when (shareMode == AudioClientShareMode.Exclusive && IsAccessDenied(ex))
+        {
+            Log("WASAPI Exclusive refusé (E_ACCESSDENIED), fallback vers WASAPI Shared.");
+            try { _capture?.Dispose(); } catch { }
+            try { _playback?.Dispose(); } catch { }
+            _capture = null;
+            _playback = null;
+            _buffer = null;
+            StartWasapiLiveCore(inputDevice, outputDevice, AudioClientShareMode.Shared);
+        }
+    }
+
+    private void StartWasapiLiveCore(MMDevice inputDevice, MMDevice outputDevice, AudioClientShareMode shareMode)
+    {
+        _capture      = new WasapiCapture(inputDevice) { ShareMode = shareMode };
+        _wasapiFormat = _capture.WaveFormat;
+        Log($"WASAPI Live: {_wasapiFormat.Encoding} {_wasapiFormat.SampleRate} Hz {_wasapiFormat.BitsPerSample} bit ×{_wasapiFormat.Channels}");
+
+        if (_wasapiFormat.SampleRate != SampleRate)
+        {
+            Log($"Adapting SampleRate → {_wasapiFormat.SampleRate} Hz");
+            SampleRate = _wasapiFormat.SampleRate;
+        }
+
+        _capture.DataAvailable += OnWasapiData;
+
+        _buffer = new BufferedWaveProvider(_wasapiFormat)
+        {
+            BufferLength          = BufferSize * _wasapiFormat.BlockAlign * 10,
+            DiscardOnBufferOverflow = true
+        };
+
+        int latencyMs = Math.Max(1, (int)((double)BufferSize / SampleRate * 1000.0));
+        var wasapiOut = new WasapiOut(outputDevice, shareMode, false, latencyMs);
+        wasapiOut.Init(_buffer);
+        _playback = wasapiOut;
+
+        _capture.StartRecording();
+        _playback.Play();
+    }
+
+    private void StartWasapiOscillator()
+    {
+        var outputDevice = OutputDevice ?? new MMDeviceEnumerator().GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+        var shareMode    = Driver == AudioDriver.WASAPI_Exclusive
+                           ? AudioClientShareMode.Exclusive
+                           : AudioClientShareMode.Shared;
+
+        try
+        {
+            StartWasapiOscillatorCore(outputDevice, shareMode);
+        }
+        catch (Exception ex) when (shareMode == AudioClientShareMode.Exclusive && IsAccessDenied(ex))
+        {
+            Log("WASAPI Exclusive refusé (E_ACCESSDENIED), fallback vers WASAPI Shared.");
+            try { _playback?.Dispose(); } catch { }
+            _playback = null;
+            _sineProvider = null;
+            StartWasapiOscillatorCore(outputDevice, AudioClientShareMode.Shared);
+        }
+    }
+
+    private void StartWasapiOscillatorCore(MMDevice outputDevice, AudioClientShareMode shareMode)
+    {
+
+        // Aligner sur le format mix du périphérique pour éviter les erreurs WASAPI
+        int deviceSampleRate = SampleRate;
+        int deviceChannels   = 1;
+        try
+        {
+            var mixFmt       = outputDevice.AudioClient.MixFormat;
+            deviceSampleRate = mixFmt.SampleRate;
+            deviceChannels   = mixFmt.Channels;
+            SampleRate       = deviceSampleRate;
+        }
+        catch { /* utilise les valeurs par défaut */ }
+
+        _sineProvider = new SineWaveProvider(deviceSampleRate)
+        {
+            Frequency = _oscFrequency,
+            Amplitude = _oscAmplitude
+        };
+        _sineProvider.SamplesGenerated += OnOscillatorSamples;
+
+        // Convertir mono→stéréo si nécessaire
+        ISampleProvider source = _sineProvider;
+        if (deviceChannels >= 2 && _sineProvider.WaveFormat.Channels == 1)
+            source = new MonoToStereoSampleProvider(_sineProvider);
+
+        int latencyMs = Math.Max(20, (int)((double)BufferSize / SampleRate * 1000.0));
+        var wasapiOut = new WasapiOut(outputDevice, shareMode, false, latencyMs);
+        wasapiOut.Init(source);
+        _playback = wasapiOut;
+        _playback.Play();
+
+        Log($"WASAPI Oscillator: {_oscFrequency} Hz @ {deviceSampleRate} Hz ×{deviceChannels}");
+    }
+
+    private void OnWasapiData(object? sender, WaveInEventArgs e)
+    {
+        _processingTimer.Restart();
+
+        var wf = _wasapiFormat ?? _capture?.WaveFormat;
+        if (wf == null) return;
+
+        int frames = e.BytesRecorded / wf.BlockAlign;
+        EnsureFloatBuffer(frames);
+
+        try
+        {
+            DecodeToMono(e.Buffer, e.BytesRecorded, wf, _floatBuffer, frames);
+            WriteToBuffer(frames, wf);
+            UpdateMeters(frames);
+
+            var slice = new float[frames];
+            Array.Copy(_floatBuffer, slice, frames);
+            OnAudioFrame?.Invoke(slice, frames, wf.SampleRate);
+        }
+        catch (Exception ex) { Log("[WASAPI] error: " + ex.Message); }
+    }
+
+    private void OnOscillatorSamples(float[] samples, int frames, int sampleRate)
+    {
+        EnsureFloatBuffer(frames);
+        Array.Copy(samples, _floatBuffer, frames);
+        UpdateMeters(frames);
+        OnAudioFrame?.Invoke(samples, frames, sampleRate);
+    }
+
+    /// <summary>Décode les octets WASAPI en float mono [-1..1].</summary>
+    private static void DecodeToMono(byte[] src, int bytesRecorded, WaveFormat wf, float[] dest, int frames)
+    {
+        int blockAlign = wf.BlockAlign;
+        int channels   = wf.Channels;
+        int bits       = wf.BitsPerSample;
+        bool isFloat   = wf.Encoding == WaveFormatEncoding.IeeeFloat;
+
+        if (bits == 32 && isFloat)
+        {
+            for (int f = 0, o = 0; f < frames; f++, o += blockAlign)
+            {
+                float s = 0f;
+                for (int c = 0; c < channels; c++)
+                    s += BitConverter.ToSingle(src, o + c * 4);
+                dest[f] = s / channels;
+            }
+        }
+        else if (bits == 16 && !isFloat)
+        {
+            for (int f = 0, o = 0; f < frames; f++, o += blockAlign)
+            {
+                int s = 0;
+                for (int c = 0; c < channels; c++)
+                {
+                    int ix = o + c * 2;
+                    s += (short)(src[ix] | (src[ix + 1] << 8));
+                }
+                dest[f] = (s / (float)channels) / 32768f;
+            }
+        }
+        else
+        {
+            Array.Clear(dest, 0, frames);
+        }
+    }
+
+    /// <summary>Ré-encode le buffer mono float vers le format WASAPI et l'ajoute au BufferedWaveProvider.</summary>
+    private void WriteToBuffer(int frames, WaveFormat wf)
+    {
+        int channels = wf.Channels;
+        int bits     = wf.BitsPerSample;
+        bool isFloat = wf.Encoding == WaveFormatEncoding.IeeeFloat;
+        byte[] outBuf = new byte[frames * wf.BlockAlign];
+
+        if (bits == 32 && isFloat)
+        {
+            for (int f = 0, o = 0; f < frames; f++)
+            {
+                var b = BitConverter.GetBytes(Math.Clamp(_floatBuffer[f], -1f, 1f));
+                for (int c = 0; c < channels; c++)
+                {
+                    outBuf[o++] = b[0]; outBuf[o++] = b[1];
+                    outBuf[o++] = b[2]; outBuf[o++] = b[3];
+                }
+            }
+        }
+        else if (bits == 16 && !isFloat)
+        {
+            for (int f = 0, o = 0; f < frames; f++)
+            {
+                short s = (short)(Math.Clamp(_floatBuffer[f], -1f, 1f) * 32767);
+                for (int c = 0; c < channels; c++)
+                {
+                    outBuf[o++] = (byte)(s & 0xFF);
+                    outBuf[o++] = (byte)(s >> 8);
+                }
+            }
+        }
+        else return;
+
+        _buffer?.AddSamples(outBuf, 0, outBuf.Length);
+    }
+
+    // ── ASIO ─────────────────────────────────────────────────────────────────
+
+    public void StartAsioTest(int durationMs = 1000, float frequency = 800f, float amplitude = 0.5f)
+    {
+        _testFrequency = frequency;
+        _testAmplitude = amplitude;
+        Interlocked.Exchange(ref _testRemainingSamples, (int)(durationMs / 1000.0 * SampleRate));
+        _testPhase = 0.0;
+        Volatile.Write(ref _testActive, true);
+
+        if (Driver != AudioDriver.ASIO) Driver = AudioDriver.ASIO;
+        if (string.IsNullOrEmpty(_asioDriverName)) { Log("No ASIO driver set."); return; }
+
+        if (!IsMonitoring)
+        {
+            try { StartAudio(); Log("ASIO test tone started."); }
+            catch (Exception ex) { Log("ASIO test failed: " + ex.Message); Volatile.Write(ref _testActive, false); }
+        }
+    }
+
+    public void StopAsioTest()
+    {
+        Volatile.Write(ref _testActive, false);
+        Interlocked.Exchange(ref _testRemainingSamples, 0);
+    }
+
+    public (int inputCount, int outputCount) ProbeAsioChannels(string driverName)
+    {
+        try
+        {
+            using var probe = new AsioOut(driverName);
+            var inProp  = typeof(AsioOut).GetProperty("DriverInputChannelCount");
+            var outProp = typeof(AsioOut).GetProperty("DriverOutputChannelCount");
+            if (inProp != null && outProp != null)
+            {
+                int inC  = (int)(inProp.GetValue(probe)  ?? 0);
+                int outC = (int)(outProp.GetValue(probe) ?? 0);
+                Log($"ProbeAsio '{driverName}': {inC} in, {outC} out");
+                return (inC, outC);
+            }
+            return (0, 0);
+        }
+        catch (Exception ex)
+        {
+            Log($"ProbeAsio failed ('{driverName}'): {FormatExceptionDetails(ex)}");
+            return (0, 0);
+        }
+    }
+
+    private void StartAsio()
+    {
+        if (string.IsNullOrEmpty(_asioDriverName))
+            throw new InvalidOperationException("No ASIO driver selected");
+
+        _asio = new AsioOut(_asioDriverName);
+        _asio.AudioAvailable += OnAsioAudioAvailable;
+
+        int driverIn = 0, driverOut = 0;
+        var ip = typeof(AsioOut).GetProperty("DriverInputChannelCount");
+        var op = typeof(AsioOut).GetProperty("DriverOutputChannelCount");
+        if (ip != null) driverIn  = (int)(ip.GetValue(_asio) ?? 0);
+        if (op != null) driverOut = (int)(op.GetValue(_asio) ?? 0);
+        Log($"ASIO driver: {driverIn} in, {driverOut} out");
+
+        int inOff  = _asioInputOffset,  inCnt  = _asioInputCount;
+        int outOff = _asioOutputOffset, outCnt = _asioOutputCount;
+
+        if (driverIn  > 0) { if (inOff  >= driverIn)  inOff  = 0; if (inOff  + inCnt  > driverIn)  inCnt  = driverIn  - inOff;  if (inCnt  < 1) inCnt  = 1; }
+        if (driverOut > 0) { if (outOff >= driverOut) outOff = 0; if (outOff + outCnt > driverOut) outCnt = driverOut - outOff; if (outCnt < 1) outCnt = 1; }
+
+        _asio.InputChannelOffset = inOff;
+        _asio.ChannelOffset      = outOff;
+        Log($"ASIO Init: in[{inOff}+{inCnt}], out[{outOff}+{outCnt}], sr={SampleRate}");
+
+        try
+        {
+            _asio.InitRecordAndPlayback(new SilenceProvider(SampleRate, outCnt), inCnt, SampleRate);
+        }
+        catch (Exception ex)
+        {
+            Log($"ASIO Init failed: {ex.Message} — fallback mono/stereo");
+            _asio.Dispose();
+            _asio = new AsioOut(_asioDriverName);
+            _asio.AudioAvailable += OnAsioAudioAvailable;
+            _asio.InputChannelOffset = 0;
+            _asio.ChannelOffset      = 0;
+            _asio.InitRecordAndPlayback(new SilenceProvider(SampleRate, 2), 1, SampleRate);
+        }
+
+        _asio.Play();
+        Log($"ASIO running: {_asio.NumberOfInputChannels} in, {_asio.NumberOfOutputChannels} out");
+    }
+
+    private static unsafe void ReadAsioInput(IntPtr buf, float[] dest, int n, AsioSampleType t)
+    {
+        switch (t)
+        {
+            case AsioSampleType.Int32LSB:
+            {
+                int* s = (int*)buf;
+                for (int i = 0; i < n; i++) dest[i] = s[i] / (float)int.MaxValue;
+            } break;
+            case AsioSampleType.Int24LSB:
+            {
+                byte* s = (byte*)buf;
+                for (int i = 0; i < n; i++)
+                {
+                    int v = s[i*3] | (s[i*3+1] << 8) | (s[i*3+2] << 16);
+                    if ((v & 0x800000) != 0) v |= unchecked((int)0xFF000000);
+                    dest[i] = v / 8388608f;
+                }
+            } break;
+            case AsioSampleType.Int16LSB:
+            {
+                short* s = (short*)buf;
+                for (int i = 0; i < n; i++) dest[i] = s[i] / 32768f;
+            } break;
+            case AsioSampleType.Float32LSB:
+                Marshal.Copy(buf, dest, 0, n);
+                break;
+            default:
+                Array.Clear(dest, 0, n);
+                break;
+        }
+    }
+
+    private static unsafe void WriteAsioOutput(IntPtr buf, float[] src, int n, AsioSampleType t)
+    {
+        switch (t)
+        {
+            case AsioSampleType.Int32LSB:
+            {
+                int* d = (int*)buf;
+                for (int i = 0; i < n; i++) d[i] = (int)(Math.Clamp(src[i], -1f, 1f) * int.MaxValue);
+            } break;
+            case AsioSampleType.Int24LSB:
+            {
+                byte* d = (byte*)buf;
+                for (int i = 0; i < n; i++)
+                {
+                    int v = (int)(Math.Clamp(src[i], -1f, 1f) * 8388607f);
+                    d[i*3]   = (byte)(v & 0xFF);
+                    d[i*3+1] = (byte)((v >> 8)  & 0xFF);
+                    d[i*3+2] = (byte)((v >> 16) & 0xFF);
+                }
+            } break;
+            case AsioSampleType.Int16LSB:
+            {
+                short* d = (short*)buf;
+                for (int i = 0; i < n; i++) d[i] = (short)(Math.Clamp(src[i], -1f, 1f) * 32767f);
+            } break;
+            case AsioSampleType.Float32LSB:
+                Marshal.Copy(src, 0, buf, n);
+                break;
+        }
+    }
+
+    private unsafe void OnAsioAudioAvailable(object? sender, AsioAudioAvailableEventArgs e)
+    {
+        try
+        {
+            _processingTimer.Restart();
+            int samples  = e.SamplesPerBuffer;
+            var localIn  = e.InputBuffers;
+            var localOut = e.OutputBuffers;
+            int inCh  = localIn?.Length  ?? 0;
+            int outCh = localOut?.Length ?? 0;
+            var st    = e.AsioSampleType;
+            EnsureFloatBuffer(samples);
+
+            // Mode TestOscillator : génère un sinus et l'écrit dans les sorties ASIO
+            if (Mode == AudioMode.TestOscillator)
+            {
+                double freq = _oscFrequency;
+                double amp  = _oscAmplitude;
+                double step = 2.0 * Math.PI * freq / SampleRate;
+                for (int i = 0; i < samples; i++)
+                {
+                    _floatBuffer[i] = (float)(amp * Math.Sin(_testPhase));
+                    _testPhase     += step;
+                    if (_testPhase > 2.0 * Math.PI) _testPhase -= 2.0 * Math.PI;
+                }
+                if (localOut != null)
+                    for (int c = 0; c < outCh; c++)
+                        if (localOut[c] != IntPtr.Zero)
+                            WriteAsioOutput(localOut[c], _floatBuffer, samples, st);
+
+                UpdateMeters(samples);
+                var oscSlice = new float[samples];
+                Array.Copy(_floatBuffer, oscSlice, samples);
+                OnAudioFrame?.Invoke(oscSlice, samples, SampleRate);
+                e.WrittenToOutputBuffers = true;
+                return;
+            }
+
+            // Ton de test ASIO (StartAsioTest — durée limitée)
+            if (Volatile.Read(ref _testActive))
+            {
+                for (int i = 0; i < samples; i++)
+                {
+                    _floatBuffer[i] = (float)(_testAmplitude * Math.Sin(_testPhase));
+                    _testPhase     += 2 * Math.PI * _testFrequency / SampleRate;
+                    if (_testPhase > 2 * Math.PI) _testPhase -= 2 * Math.PI;
+                }
+                if (localOut != null)
+                    for (int c = 0; c < outCh; c++)
+                        if (localOut[c] != IntPtr.Zero)
+                            WriteAsioOutput(localOut[c], _floatBuffer, samples, st);
+
+                if (Volatile.Read(ref _testRemainingSamples) > 0
+                    && Interlocked.Add(ref _testRemainingSamples, -samples) <= 0)
+                    Volatile.Write(ref _testActive, false);
+
+                UpdateMeters(samples);
+                var testSlice = new float[samples];
+                Array.Copy(_floatBuffer, testSlice, samples);
+                OnAudioFrame?.Invoke(testSlice, samples, SampleRate);
+                e.WrittenToOutputBuffers = true;
+                return;
+            }
+
+            // Mode normal : capture entrée → sortie (monitoring)
+            if (inCh >= 1 && localIn != null && localIn[0] != IntPtr.Zero)
+                ReadAsioInput(localIn[0], _floatBuffer, samples, st);
+            else
+                Array.Clear(_floatBuffer, 0, samples);
+
+            if (localOut != null)
+                for (int c = 0; c < outCh; c++)
+                    if (localOut[c] != IntPtr.Zero)
+                        WriteAsioOutput(localOut[c], _floatBuffer, samples, st);
+
+            UpdateMeters(samples);
+            var slice = new float[samples];
+            Array.Copy(_floatBuffer, slice, samples);
+            OnAudioFrame?.Invoke(slice, samples, SampleRate);
+            e.WrittenToOutputBuffers = true;
+        }
+        catch (Exception ex)
+        {
+            try { Log("[ASIO] error: " + ex.Message); } catch { }
+            if (e != null) e.WrittenToOutputBuffers = false;
+        }
+    }
+
+    public bool ShowAsioControlPanel()
+    {
+        if (_asio != null)
+        {
+            try { _asio.ShowControlPanel(); return true; } catch { }
+        }
+        else if (!string.IsNullOrEmpty(_asioDriverName))
+        {
+            try { using var t = new AsioOut(_asioDriverName); t.ShowControlPanel(); return true; } catch { }
+        }
+        Log("ASIO control panel not available.");
+        return false;
+    }
+
+    // ── Mesures RMS / Peak ────────────────────────────────────────────────────
+
+    private void UpdateMeters(int samples)
+    {
+        float sumSq = 0f, peak = 0f;
+        for (int i = 0; i < samples; i++)
+        {
+            float abs = MathF.Abs(_floatBuffer[i]);
+            sumSq += _floatBuffer[i] * _floatBuffer[i];
+            if (abs > peak) peak = abs;
+        }
+
+        Level = MathF.Sqrt(sumSq / samples);
+
+        if (peak > _peakHold)
+        {
+            _peakHold        = peak;
+            _peakHoldSamples = PeakHoldDuration;
+        }
+        else if (_peakHoldSamples > 0)
+        {
+            _peakHoldSamples -= samples;
+        }
+        else
+        {
+            _peakHold *= 0.995f;
+        }
+        PeakLevel = _peakHold;
+
+        _processingTimer.Stop();
+        double ms = _processingTimer.Elapsed.TotalMilliseconds;
+        _processingEmaMs = _processingEmaMs <= 0.0
+                           ? ms
+                           : _emaAlpha * ms + (1.0 - _emaAlpha) * _processingEmaMs;
+
+        double bufMs = (double)BufferSize / SampleRate * 1000.0;
+        bool ov = _processingEmaMs > bufMs;
+        if (ov != CpuOverload) { CpuOverload = ov; OnCpuOverloadChanged?.Invoke(ov); }
+
+        OnMetersUpdated?.Invoke(Level, PeakLevel);
+    }
+
+    // ── Latence calculée ─────────────────────────────────────────────────────
+
+    public double CalculatedLatencyMs
+    {
+        get
+        {
+            if (Driver == AudioDriver.ASIO)
+                return (double)BufferSize / SampleRate * 1000.0 + _processingEmaMs;
+
+            double capture = (double)BufferSize / SampleRate * 1000.0;
+            double bufferMs = 0;
+            if (_buffer != null && _wasapiFormat != null && _wasapiFormat.BlockAlign > 0)
+                bufferMs = (double)(_buffer.BufferedBytes / _wasapiFormat.BlockAlign) / _wasapiFormat.SampleRate * 1000.0;
+            return capture + bufferMs + _processingEmaMs;
+        }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private void EnsureFloatBuffer(int frames)
+    {
+        if (_floatBuffer.Length >= frames) return;
+        int newSize = Math.Max(frames, Math.Max(BufferSize * 2, _floatBuffer.Length * 2));
+        var newBuf = _pool.Rent(newSize);
+        if (_floatBufferFromPool) _pool.Return(_floatBuffer, clearArray: true);
+        _floatBuffer       = newBuf;
+        _floatBufferFromPool = true;
+    }
+
+    private void ReturnFloatBuffer()
+    {
+        if (_floatBufferFromPool)
+        {
+            try { _pool.Return(_floatBuffer, clearArray: true); } catch { }
+        }
+        _floatBuffer        = Array.Empty<float>();
+        _floatBufferFromPool = false;
+    }
+
+    private static bool IsAccessDenied(Exception ex)
+        => ex is UnauthorizedAccessException || ex.HResult == unchecked((int)0x80070005);
+
+    private static string FormatExceptionDetails(Exception ex)
+    {
+        string message = string.IsNullOrWhiteSpace(ex.Message) ? "message d'erreur vide" : ex.Message;
+        string hresult = $"0x{ex.HResult:X8}";
+
+        if (ex.InnerException != null && !string.IsNullOrWhiteSpace(ex.InnerException.Message))
+            return $"{message} ({ex.GetType().Name}, HRESULT={hresult}, Inner={ex.InnerException.Message})";
+
+        return $"{message} ({ex.GetType().Name}, HRESULT={hresult})";
+    }
+
+    private void Log(string message) => OnLog?.Invoke($"[{DateTime.Now:HH:mm:ss}] {message}");
+}
+
+```
+
+
+### FILE: src/SmartJam/Audio/SineWaveProvider.cs
+```csharp
+using NAudio.Wave;
+
+namespace SmartJam.Audio;
+
+/// <summary>
+/// Générateur de sinus (ISampleProvider).
+/// Utilisé en mode TestOscillator pour produire un signal de test sans matériel.
+/// Lève SamplesGenerated après chaque Read afin que l'AudioEngine puisse
+/// alimenter OnAudioFrame et UpdateMeters.
+/// </summary>
+public class SineWaveProvider : ISampleProvider
+{
+    /// <summary>Fired après chaque appel Read. (samples, frameCount, sampleRate)</summary>
+    public event Action<float[], int, int>? SamplesGenerated;
+
+    public float Frequency { get; set; } = 440f;
+    public float Amplitude  { get; set; } = 0.6f;
+
+    private readonly WaveFormat _waveFormat;
+    private double _phase;
+
+    public SineWaveProvider(int sampleRate = 44100)
+    {
+        _waveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1);
+    }
+
+    public WaveFormat WaveFormat => _waveFormat;
+
+    public int Read(float[] buffer, int offset, int count)
+    {
+        double inc = 2.0 * Math.PI * Frequency / _waveFormat.SampleRate;
+        for (int i = 0; i < count; i++)
+        {
+            buffer[offset + i] = Amplitude * (float)Math.Sin(_phase);
+            _phase += inc;
+            if (_phase > 2.0 * Math.PI)
+                _phase -= 2.0 * Math.PI;
+        }
+
+        if (count > 0 && SamplesGenerated != null)
+        {
+            var slice = new float[count];
+            Array.Copy(buffer, offset, slice, 0, count);
+            SamplesGenerated(slice, count, _waveFormat.SampleRate);
+        }
+
+        return count;
+    }
+}
+
+```
+
+
+### FILE: src/SmartJam/Services/PitchDetectorService.cs
+```csharp
+using NWaves.Features;
+using NWaves.Signals;
+
+namespace SmartJam.Services;
+
+/// <summary>
+/// Service de détection de pitch (hauteur sonore) utilisant l'algorithme YIN (NWaves).
+///
+/// Utilisation :
+///   1) Crée une instance : var service = new PitchDetectorService(sampleRate: 44100);
+///   2) Appelle DetectPitch(samples) à chaque buffer audio reçu.
+///   3) Le résultat est (Hz, noteName) ou (0, "—") si rien n'est détecté.
+///
+/// Algorithme YIN :
+///   - Prend un tableau de float (échantillons audio normalisés [-1..1])
+///   - Retourne la fréquence fondamentale en Hz
+///   - Référence : de Cheveigné & Kawahara (2002)
+/// </summary>
+public class PitchDetectorService
+{
+    private readonly int _sampleRate;
+
+    // Fréquences limites : en dehors, le pitch est ignoré
+    private const float MinHz = 35f;
+    private const float MaxHz = 1200f;
+
+    // Seuil CMDF YIN (0.15 = bon équilibre précision/bruit)
+    private const float YinThreshold = 0.15f;
+
+    // Noms des notes pour la conversion Hz → note
+    private static readonly string[] NoteNames =
+        { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+
+    public PitchDetectorService(int sampleRate = 44100)
+    {
+        _sampleRate = sampleRate;
+    }
+
+    /// <summary>
+    /// Détecte le pitch dans un buffer de samples.
+    /// </summary>
+    /// <param name="samples">Buffer audio (float[], normalisé -1..1)</param>
+    /// <returns>
+    /// (hz, noteName) : fréquence détectée et nom de la note.
+    /// Si aucun pitch clair, retourne (0f, "—").
+    /// </returns>
+    public (float Hz, string NoteName) DetectPitch(float[] samples)
+    {
+        if (samples.Length < 512) return (0f, "—");
+
+        var signal = new DiscreteSignal(_sampleRate, samples);
+        float hz = Pitch.FromYin(signal, 0, samples.Length, MinHz, MaxHz, YinThreshold);
+
+        if (hz < MinHz || hz > MaxHz)
+            return (0f, "—");
+
+        return (hz, HzToNoteName(hz));
+    }
+
+    /// <summary>
+    /// Convertit une fréquence Hz en nom de note (ex. "A4", "C4").
+    /// </summary>
+    public static string HzToNoteName(float hz)
+    {
+        if (hz <= 0) return "—";
+        double midi    = 12.0 * Math.Log2(hz / 440.0) + 69.0;
+        int midiNote   = (int)Math.Round(midi);
+        int noteClass  = ((midiNote % 12) + 12) % 12;
+        int octave     = midiNote / 12 - 1;
+        return $"{NoteNames[noteClass]}{octave}";
+    }
+}
+
+```
+
+
+### FILE: src/SmartJam/Services/AccompanimentGeneratorService.cs
+```csharp
+namespace SmartJam.Services;
+
+/// <summary>
+/// Représente un accord (triade) : nom + notes MIDI.
+/// Ex. : C major = {60, 64, 67}
+/// </summary>
+public record Chord(string Name, int[] MidiNotes)
+{
+    public override string ToString() => Name;
+}
+
+/// <summary>
+/// Service de génération de progression d'accords.
+///
+/// Algorithme "règles musicales" (pas d'IA) :
+///   1. On calcule les notes de la gamme majeure pour la tonalité donnée.
+///   2. On construit des triades sur les degrés de la gamme.
+///   3. On applique un pattern de progression selon le style.
+///
+/// Exemple (Do majeur, style pop) : C – G – Am – F (I – V – vi – IV)
+/// </summary>
+public class AccompanimentGeneratorService
+{
+    // Intervalles de la gamme majeure (demi-tons depuis la tonique)
+    private static readonly int[] MajorScale = { 0, 2, 4, 5, 7, 9, 11 };
+
+    // Qualité maj/min pour chaque degré de la gamme majeure
+    private static readonly bool[] IsMajor = { true, false, false, true, true, false, false };
+
+    // Numéro MIDI de la tonique par tonalité (C4 = 60)
+    private static readonly Dictionary<string, int> KeyMidi = new()
+    {
+        {"C",60}, {"C#",61}, {"Db",61}, {"D",62}, {"D#",63}, {"Eb",63},
+        {"E",64}, {"F",65}, {"F#",66}, {"Gb",66}, {"G",67}, {"G#",68},
+        {"Ab",68}, {"A",69}, {"A#",70}, {"Bb",70}, {"B",71}
+    };
+
+    // Patterns de progression (degrés 0-indexed : I=0, II=1, ...)
+    private static readonly Dictionary<string, int[]> Patterns = new()
+    {
+        {"pop",   new[]{0, 4, 5, 3}},  // I – V – vi – IV
+        {"jazz",  new[]{1, 4, 0, 0}},  // ii – V – I – I
+        {"blues", new[]{0, 3, 0, 4}},  // I – IV – I – V
+    };
+
+    private static readonly string[] DegreeNames = {"I","II","III","IV","V","VI","VII"};
+    private static readonly string[] NoteNames   = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+
+    /// <summary>
+    /// Génère une progression pour le nombre de mesures demandé.
+    /// </summary>
+    public List<Chord> Generate(string key = "C", string style = "pop", int bars = 8)
+    {
+        int root = KeyMidi.GetValueOrDefault(key, 60);
+        int[] pattern = Patterns.GetValueOrDefault(style.ToLower(), Patterns["pop"]);
+
+        var result = new List<Chord>();
+        for (int i = 0; i < bars; i++)
+        {
+            int degree    = pattern[i % pattern.Length];
+            int interval  = MajorScale[degree % 7];
+            bool major    = IsMajor[degree % 7];
+            int chordRoot = root + interval;
+            int third     = major ? chordRoot + 4 : chordRoot + 3;
+            int fifth     = chordRoot + 7;
+
+            string rootName = NoteNames[chordRoot % 12];
+            string quality  = major ? "maj" : "min";
+            string name     = $"{DegreeNames[degree % 7]} — {rootName} {quality}";
+
+            result.Add(new Chord(name, new[]{ chordRoot, third, fifth }));
+        }
+        return result;
+    }
+}
+
+```
+
+
+### FILE: src/SmartJam/Services/SineAudioSource.cs
+```csharp
+namespace SmartJam.Services;
+
+/// <summary>
+/// Génère un signal sinusoïdal pur en mémoire (test offline sans micro).
+/// Permet de simuler l'entrée audio pour la détection de pitch.
+/// </summary>
+public static class SineAudioSource
+{
+    /// <summary>
+    /// Génère un tableau de float[] représentant un sinus pur.
+    /// </summary>
+    /// <param name="frequency">Fréquence en Hz (ex. 440 pour La4)</param>
+    /// <param name="sampleRate">Taux d'échantillonnage (ex. 44100)</param>
+    /// <param name="durationSeconds">Durée en secondes</param>
+    public static float[] Generate(float frequency, int sampleRate = 44100, float durationSeconds = 1.0f)
+    {
+        int count = (int)(sampleRate * durationSeconds);
+        float[] buf = new float[count];
+        for (int i = 0; i < count; i++)
+        {
+            double t = (double)i / sampleRate;
+            buf[i] = (float)Math.Sin(2.0 * Math.PI * frequency * t);
+        }
+        return buf;
+    }
+}
+
+```
+
+
+### FILE: src/SmartJam/ViewModels/SettingsViewModel.cs
+```csharp
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using NAudio.CoreAudioApi;
+using SmartJam.Audio;
+
+namespace SmartJam.ViewModels;
+
+/// <summary>
+/// ViewModel de la fenêtre de paramètres audio.
+/// Expose les listes de drivers/périphériques et permet d'appliquer la configuration à l'AudioEngine.
+/// </summary>
+public partial class SettingsViewModel : ObservableObject
+{
+    private readonly AudioEngine _engine;
+
+    // ── Drivers ──────────────────────────────────────────────────────────────
+
+    public IReadOnlyList<string> AudioDrivers { get; } =
+        new List<string> { "WASAPI Shared", "WASAPI Exclusive", "ASIO" };
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsWasapiSelected))]
+    [NotifyPropertyChangedFor(nameof(IsAsioSelected))]
+    private string _selectedAudioDriver = "WASAPI Shared";
+
+    public bool IsWasapiSelected => !IsAsioSelected;
+    public bool IsAsioSelected   => SelectedAudioDriver == "ASIO";
+
+    // ── WASAPI — périphériques ────────────────────────────────────────────────
+
+    public ObservableCollection<string> InputDevices  { get; } = [];
+    public ObservableCollection<string> OutputDevices { get; } = [];
+
+    // Raw device lists (parallel to display names)
+    private readonly List<MMDevice> _inputDeviceObjects  = [];
+    private readonly List<MMDevice> _outputDeviceObjects = [];
+
+    [ObservableProperty]
+    private string? _selectedInputDevice;
+
+    [ObservableProperty]
+    private string? _selectedOutputDevice;
+
+    // ── ASIO — drivers ───────────────────────────────────────────────────────
+
+    public ObservableCollection<string> AsioDrivers { get; } = [];
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AsioMaxInputOffset))]
+    [NotifyPropertyChangedFor(nameof(AsioMaxOutputOffset))]
+    private string? _selectedAsioDriver;
+
+    // ── ASIO — canaux ────────────────────────────────────────────────────────
+
+    [ObservableProperty]
+    private int _asioInputOffset;
+
+    [ObservableProperty]
+    private int _asioOutputOffset;
+
+    private int _asioMaxInputOffset  = 7;
+    private int _asioMaxOutputOffset = 7;
+
+    public int AsioMaxInputOffset
+    {
+        get => _asioMaxInputOffset;
+        private set => SetProperty(ref _asioMaxInputOffset, value);
+    }
+
+    public int AsioMaxOutputOffset
+    {
+        get => _asioMaxOutputOffset;
+        private set => SetProperty(ref _asioMaxOutputOffset, value);
+    }
+
+    // ── Sample Rate ───────────────────────────────────────────────────────────
+
+    public IReadOnlyList<int> SampleRates { get; } = [44100, 48000, 96000];
+
+    [ObservableProperty]
+    private int _selectedSampleRate = 44100;
+
+    // ── Buffer Size ───────────────────────────────────────────────────────────
+
+    public IReadOnlyList<int> BufferSizes { get; } = [64, 128, 256, 512, 1024];
+
+    [ObservableProperty]
+    private int _selectedBufferSize = 256;
+
+    // ── Status ────────────────────────────────────────────────────────────────
+
+    [ObservableProperty]
+    private string _statusMessage = string.Empty;
+
+    // ── Construction ─────────────────────────────────────────────────────────
+
+    public SettingsViewModel(AudioEngine engine)
+    {
+        _engine = engine;
+
+        // Initialise les listes de périphériques
+        RefreshDevices();
+
+        // Pré-sélectionne les valeurs actuelles du moteur
+        SelectedSampleRate  = engine.SampleRate;
+        SelectedBufferSize  = engine.BufferSize;
+        SelectedAudioDriver = engine.Driver switch
+        {
+            AudioDriver.WASAPI_Exclusive => "WASAPI Exclusive",
+            AudioDriver.ASIO             => "ASIO",
+            _                            => "WASAPI Shared"
+        };
+
+        var routing = engine.GetAsioRouting();
+        AsioInputOffset  = routing.inputOffset;
+        AsioOutputOffset = routing.outputOffset;
+
+        // Si un driver ASIO est déjà sélectionné, on sonde ses canaux
+        if (SelectedAsioDriver != null)
+            ProbeAndUpdateAsioChannels(SelectedAsioDriver);
+    }
+
+    // ── Handlers de changement de propriété ──────────────────────────────────
+
+    partial void OnSelectedAsioDriverChanged(string? value)
+    {
+        if (value != null)
+            ProbeAndUpdateAsioChannels(value);
+    }
+
+    private void ProbeAndUpdateAsioChannels(string driverName)
+    {
+        try
+        {
+            var (inCnt, outCnt) = _engine.ProbeAsioChannels(driverName);
+            AsioMaxInputOffset  = Math.Max(0, inCnt  - 1);
+            AsioMaxOutputOffset = Math.Max(0, outCnt - 1);
+            if (AsioInputOffset  > AsioMaxInputOffset)  AsioInputOffset  = 0;
+            if (AsioOutputOffset > AsioMaxOutputOffset) AsioOutputOffset = 0;
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Impossible de sonder les canaux ASIO : {ex.Message}";
+        }
+    }
+
+    // ── Commandes ─────────────────────────────────────────────────────────────
+
+    [RelayCommand]
+    private void OpenAsioControlPanel()
+    {
+        bool ok = _engine.ShowAsioControlPanel();
+        StatusMessage = ok ? "Panneau de contrôle ASIO ouvert." : "Panneau ASIO indisponible ou non supporté par ce driver.";
+    }
+
+    [RelayCommand]
+    private void RefreshDevices()
+    {
+        // WASAPI
+        _inputDeviceObjects.Clear();
+        _outputDeviceObjects.Clear();
+        InputDevices.Clear();
+        OutputDevices.Clear();
+
+        try
+        {
+            foreach (var dev in _engine.GetInputDevices())
+            {
+                _inputDeviceObjects.Add(dev);
+                InputDevices.Add(dev.FriendlyName);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Impossible de lister les entrées : {ex.Message}";
+        }
+
+        try
+        {
+            foreach (var dev in _engine.GetOutputDevices())
+            {
+                _outputDeviceObjects.Add(dev);
+                OutputDevices.Add(dev.FriendlyName);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Impossible de lister les sorties : {ex.Message}";
+        }
+
+        // Pré-sélectionner les périphériques actuellement assignés dans le moteur
+        if (_engine.InputDevice != null)
+            SelectedInputDevice = _engine.InputDevice.FriendlyName;
+        else if (InputDevices.Count > 0)
+            SelectedInputDevice = InputDevices[0];
+
+        if (_engine.OutputDevice != null)
+            SelectedOutputDevice = _engine.OutputDevice.FriendlyName;
+        else if (OutputDevices.Count > 0)
+            SelectedOutputDevice = OutputDevices[0];
+
+        // ASIO
+        AsioDrivers.Clear();
+        try
+        {
+            foreach (var drv in AudioEngine.GetAsioDrivers())
+                AsioDrivers.Add(drv);
+        }
+        catch (PlatformNotSupportedException)
+        { /* ASIO pas disponible sur tous les systèmes (Linux, etc.) */ }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Impossible de lister les drivers ASIO : {ex.Message}";
+        }
+
+        if (SelectedAsioDriver == null && AsioDrivers.Count > 0)
+            SelectedAsioDriver = AsioDrivers[0];
+    }
+
+    /// <summary>Applique les paramètres sélectionnés à l'AudioEngine.</summary>
+    [RelayCommand]
+    private void Apply()
+    {
+        _engine.SampleRate  = SelectedSampleRate;
+        _engine.BufferSize  = SelectedBufferSize;
+
+        _engine.Driver = SelectedAudioDriver switch
+        {
+            "WASAPI Exclusive" => AudioDriver.WASAPI_Exclusive,
+            "ASIO"             => AudioDriver.ASIO,
+            _                  => AudioDriver.WASAPI_Shared
+        };
+
+        if (IsAsioSelected && SelectedAsioDriver != null)
+        {
+            _engine.SetAsioDriver(SelectedAsioDriver);
+            _engine.SetAsioRouting(AsioInputOffset, AsioOutputOffset,
+                                   inputCount: 1, outputCount: 2);
+        }
+
+        if (IsWasapiSelected)
+        {
+            int inIdx  = SelectedInputDevice  != null ? InputDevices.IndexOf(SelectedInputDevice)  : -1;
+            int outIdx = SelectedOutputDevice != null ? OutputDevices.IndexOf(SelectedOutputDevice) : -1;
+
+            _engine.InputDevice  = inIdx  >= 0 ? _inputDeviceObjects[inIdx]  : null;
+            _engine.OutputDevice = outIdx >= 0 ? _outputDeviceObjects[outIdx] : null;
+        }
+
+        _engine.RebuildAudioGraph();
+        StatusMessage = "Paramètres appliqués.";
+    }
+}
+
+```
+
+
+### FILE: src/SmartJam/Views/MainWindow.axaml.cs
+```csharp
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using System.Globalization;
+using Avalonia;
+using Avalonia.Input;
+using Avalonia.Controls;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Threading;
+using Avalonia.Input.Platform;
+using CommunityToolkit.Mvvm.Input;
+using SmartJam.Audio;
+using SmartJam.Services;
+
+namespace SmartJam.Views;
+
+public partial class MainWindow : Window, INotifyPropertyChanged, IDisposable
+{
+    private readonly AudioEngine _engine = new();
+    private readonly PitchDetectorService _pitchService = new(sampleRate: 44100);
+    private readonly Dictionary<int, PitchDetectorService> _pitchServiceCache = new();
+    private readonly List<float> _sampleBuffer = new();
+
+    private const int AnalysisWindowSize = 4096;
+    private const int MaxPlayedNotes = 20;
+    private const int MaxLogMessages = 150;
+    private const float SilenceGateRms = 0.008f;
+    private const int MinStableDetections = 2;
+    private const double MinDb = -60.0;
+    private static readonly int[] MajorScaleIntervals = [0, 2, 4, 5, 7, 9, 11];
+    private static readonly int[] MinorScaleIntervals = [0, 2, 3, 5, 7, 8, 10];
+
+    private static readonly string[] CompactNoteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    private static readonly string[] FrenchNoteNames = ["Do", "Do#", "Ré", "Ré#", "Mi", "Fa", "Fa#", "Sol", "Sol#", "La", "La#", "Si"];
+
+    private bool _disposed;
+    private bool _isDraggingOscFrequency;
+    private Point _oscDragStartPoint;
+    private double _oscDragStartFrequency;
+    private int _oscDragAccumulatedPixels;
+
+    private const int OscDragPixelsPerStep = 2;
+    private const double OscDragStepHz = 2.0;
+    private const double OscDragStepHzFast = 10.0;
+
+    private readonly List<int> _playedMidiNotes = [];
+    private int? _lastDetectedMidi;
+    private int? _candidateMidi;
+    private int _candidateMidiHits;
+
+    public new event PropertyChangedEventHandler? PropertyChanged;
+
+    public IReadOnlyList<string> Modes { get; } = ["Live", "TestOscillator"];
+    public IReadOnlyList<string> NotationModes { get; } = ["Am", "La mineur"];
+
+    private string _selectedMode = "TestOscillator";
+    public string SelectedMode
+    {
+        get => _selectedMode;
+        set
+        {
+            if (!SetField(ref _selectedMode, value))
+                return;
+
+            IsOscillatorPanelVisible = value == "TestOscillator";
+
+            if (IsMonitoring)
+            {
+                _engine.StopAudio();
+                ApplyEngineSettings();
+
+                try
+                {
+                    _engine.StartAudio();
+                }
+                catch (Exception ex)
+                {
+                    AddLog($"Erreur redémarrage : {ex.Message}");
+                    IsMonitoring = false;
+                    MonitoringButtonText = "Monitoring ON";
+                }
+            }
+        }
+    }
+
+    private bool _isOscillatorPanelVisible = true;
+    public bool IsOscillatorPanelVisible
+    {
+        get => _isOscillatorPanelVisible;
+        set => SetField(ref _isOscillatorPanelVisible, value);
+    }
+
+    private double? _oscFrequency = 440.0;
+    public double? OscFrequency
+    {
+        get => _oscFrequency;
+        set
+        {
+            if (!SetField(ref _oscFrequency, value) || value is null)
+                return;
+
+            _engine.OscillatorFrequency = (float)value.Value;
+        }
+    }
+
+    private double _oscAmplitude = 0.5;
+    public double OscAmplitude
+    {
+        get => _oscAmplitude;
+        set
+        {
+            if (!SetField(ref _oscAmplitude, value))
+                return;
+
+            _engine.OscillatorAmplitude = (float)value;
+        }
+    }
+
+    private bool _isMonitoring;
+    public bool IsMonitoring
+    {
+        get => _isMonitoring;
+        set => SetField(ref _isMonitoring, value);
+    }
+
+    private string _monitoringButtonText = "Monitoring ON";
+    public string MonitoringButtonText
+    {
+        get => _monitoringButtonText;
+        set => SetField(ref _monitoringButtonText, value);
+    }
+
+    private double _inputLevel;
+    public double InputLevel
+    {
+        get => _inputLevel;
+        set => SetField(ref _inputLevel, value);
+    }
+
+    private double _peakLevel;
+    public double PeakLevel
+    {
+        get => _peakLevel;
+        set => SetField(ref _peakLevel, value);
+    }
+
+    private string _inputLevelDb = "-inf dBFS";
+    public string InputLevelDb
+    {
+        get => _inputLevelDb;
+        set => SetField(ref _inputLevelDb, value);
+    }
+
+    private string _peakLevelDb = "-inf dBFS";
+    public string PeakLevelDb
+    {
+        get => _peakLevelDb;
+        set => SetField(ref _peakLevelDb, value);
+    }
+
+    private string _rmsMeterColor = "#1BB155";
+    public string RmsMeterColor
+    {
+        get => _rmsMeterColor;
+        set => SetField(ref _rmsMeterColor, value);
+    }
+
+    private string _peakMeterColor = "#25B860";
+    public string PeakMeterColor
+    {
+        get => _peakMeterColor;
+        set => SetField(ref _peakMeterColor, value);
+    }
+
+    private string _detectedFrequency = "— Hz";
+    public string DetectedFrequency
+    {
+        get => _detectedFrequency;
+        set => SetField(ref _detectedFrequency, value);
+    }
+
+    private string _detectedNote = "—";
+    public string DetectedNote
+    {
+        get => _detectedNote;
+        set => SetField(ref _detectedNote, value);
+    }
+
+    private string _possibleKey = "—";
+    public string PossibleKey
+    {
+        get => _possibleKey;
+        set => SetField(ref _possibleKey, value);
+    }
+
+    private string _possibleChord = "—";
+    public string PossibleChord
+    {
+        get => _possibleChord;
+        set => SetField(ref _possibleChord, value);
+    }
+
+    private string _audioDriverLabel = "WASAPI Shared";
+    public string AudioDriverLabel
+    {
+        get => _audioDriverLabel;
+        set => SetField(ref _audioDriverLabel, value);
+    }
+
+    private string _sampleRateLabel = "44100 Hz";
+    public string SampleRateLabel
+    {
+        get => _sampleRateLabel;
+        set => SetField(ref _sampleRateLabel, value);
+    }
+
+    private string _bufferSizeLabel = "256";
+    public string BufferSizeLabel
+    {
+        get => _bufferSizeLabel;
+        set => SetField(ref _bufferSizeLabel, value);
+    }
+
+    public ObservableCollection<string> PlayedNotes { get; } = [];
+    public ObservableCollection<string> LogMessages { get; } = [];
+
+    private string _selectedNotation = "Am";
+    public string SelectedNotation
+    {
+        get => _selectedNotation;
+        set
+        {
+            if (!SetField(ref _selectedNotation, value))
+                return;
+
+            RefreshDetectedNoteDisplay();
+            RefreshPlayedNotesDisplay();
+            UpdateHarmonyAnalysis();
+        }
+    }
+
+    public IRelayCommand ToggleMonitoringCommand { get; }
+    public IAsyncRelayCommand OpenSettingsCommand { get; }
+    public IRelayCommand ResetPlayedNotesCommand { get; }
+    public IAsyncRelayCommand CopyLogsCommand { get; }
+
+    public MainWindow()
+    {
+        InitializeComponent();
+
+        ToggleMonitoringCommand = new RelayCommand(ToggleMonitoring);
+        OpenSettingsCommand = new AsyncRelayCommand(OpenSettingsAsync);
+        ResetPlayedNotesCommand = new RelayCommand(ResetPlayedNotes);
+        CopyLogsCommand = new AsyncRelayCommand(CopyLogsAsync);
+
+        DataContext = this;
+
+        _engine.OnAudioFrame += HandleAudioFrame;
+        _engine.OnMetersUpdated += HandleMeters;
+        _engine.OnLog += HandleEngineLog;
+
+        RefreshSettingsLabels();
+        AddLog("SmartJam prêt. Sélectionner un mode et cliquer sur Monitoring ON.");
+    }
+
+    private void ToggleMonitoring()
+    {
+        if (IsMonitoring)
+        {
+            _engine.StopMonitoring();
+            IsMonitoring = false;
+            MonitoringButtonText = "Monitoring ON";
+            InputLevel = 0;
+            PeakLevel = 0;
+            return;
+        }
+
+        ApplyEngineSettings();
+        try
+        {
+            _engine.StartMonitoring();
+
+            if (_engine.IsMonitoring)
+            {
+                IsMonitoring = true;
+                MonitoringButtonText = "Monitoring OFF";
+            }
+            else
+            {
+                IsMonitoring = false;
+                MonitoringButtonText = "Monitoring ON";
+                AddLog(_engine.LastStartError ?? "Impossible de démarrer le monitoring audio.");
+            }
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Impossible de démarrer : {ex.Message}");
+        }
+    }
+
+    private async Task OpenSettingsAsync()
+    {
+        var settingsVm = new ViewModels.SettingsViewModel(_engine);
+        var window = new SettingsWindow { DataContext = settingsVm };
+
+        var lifetime = Avalonia.Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;
+        var mainWin = lifetime?.MainWindow;
+
+        if (mainWin != null)
+            await window.ShowDialog(mainWin);
+        else
+            window.Show();
+
+        if (settingsVm.StatusMessage == "Paramètres appliqués.")
+        {
+            AddLog($"Settings appliqués : {settingsVm.SelectedAudioDriver}, {settingsVm.SelectedSampleRate} Hz, buffer {settingsVm.SelectedBufferSize}");
+            IsMonitoring = _engine.IsMonitoring;
+            MonitoringButtonText = _engine.IsMonitoring ? "Monitoring OFF" : "Monitoring ON";
+            RefreshSettingsLabels();
+        }
+    }
+
+    private void ResetPlayedNotes()
+    {
+        _playedMidiNotes.Clear();
+        PlayedNotes.Clear();
+        PossibleKey = "—";
+        PossibleChord = "—";
+        AddLog("Historique des notes réinitialisé.");
+    }
+
+    private void HandleAudioFrame(float[] samples, int frames, int sampleRate)
+    {
+        lock (_sampleBuffer)
+        {
+            _sampleBuffer.AddRange(new ArraySegment<float>(samples, 0, Math.Min(frames, samples.Length)));
+
+            if (_sampleBuffer.Count < AnalysisWindowSize)
+                return;
+
+            var batch = _sampleBuffer.GetRange(0, AnalysisWindowSize).ToArray();
+            _sampleBuffer.RemoveRange(0, AnalysisWindowSize);
+
+            Task.Run(() => RunPitchDetection(batch, sampleRate));
+        }
+    }
+
+    private void HandleMeters(float rms, float peak)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            var rmsDb = ToDb(rms);
+            var peakDb = ToDb(peak);
+
+            InputLevel = DbToMeterValue(rmsDb);
+            PeakLevel = DbToMeterValue(peakDb);
+
+            InputLevelDb = FormatDb(rmsDb);
+            PeakLevelDb = FormatDb(peakDb);
+
+            RmsMeterColor = GetMeterColor(rmsDb);
+            PeakMeterColor = GetMeterColor(peakDb);
+        });
+    }
+
+    private void HandleEngineLog(string message)
+        => Dispatcher.UIThread.Post(() => AddLog(message));
+
+    private void OnOscFrequencyPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (sender is not Control dragZone)
+            return;
+
+        var point = e.GetCurrentPoint(dragZone);
+        if (!point.Properties.IsLeftButtonPressed)
+            return;
+
+        _isDraggingOscFrequency = true;
+        _oscDragStartPoint = point.Position;
+        _oscDragStartFrequency = OscFrequency ?? 440.0;
+        _oscDragAccumulatedPixels = 0;
+        e.Pointer.Capture(dragZone);
+        e.Handled = true;
+    }
+
+    private void OnOscFrequencyPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (!_isDraggingOscFrequency || sender is not Control dragZone)
+            return;
+
+        var point = e.GetCurrentPoint(dragZone);
+        int deltaPixels = (int)Math.Round(_oscDragStartPoint.Y - point.Position.Y);
+        int netPixels = deltaPixels - _oscDragAccumulatedPixels;
+
+        if (Math.Abs(netPixels) < OscDragPixelsPerStep)
+            return;
+
+        int steps = netPixels / OscDragPixelsPerStep;
+        _oscDragAccumulatedPixels += steps * OscDragPixelsPerStep;
+
+        double stepHz = e.KeyModifiers.HasFlag(KeyModifiers.Shift) ? OscDragStepHzFast : OscDragStepHz;
+        double next = (_oscDragStartFrequency + (steps * stepHz));
+        next = Math.Clamp(next, 20.0, 4000.0);
+
+        _oscDragStartFrequency = next;
+        OscFrequency = next;
+        e.Handled = true;
+    }
+
+    private void OnOscFrequencyPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (sender is Control)
+            e.Pointer.Capture(null);
+
+        _isDraggingOscFrequency = false;
+        _oscDragAccumulatedPixels = 0;
+    }
+
+    private void OnOscFrequencyPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        _isDraggingOscFrequency = false;
+        _oscDragAccumulatedPixels = 0;
+    }
+
+    private void RunPitchDetection(float[] samples, int sampleRate)
+    {
+        float rms = ComputeRms(samples);
+
+        if (rms < SilenceGateRms)
+        {
+            _candidateMidi = null;
+            _candidateMidiHits = 0;
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                DetectedFrequency = "— Hz";
+                DetectedNote = "—";
+            });
+            return;
+        }
+
+        PitchDetectorService service;
+        if (sampleRate == 44100)
+        {
+            service = _pitchService;
+        }
+        else
+        {
+            lock (_pitchServiceCache)
+            {
+                if (!_pitchServiceCache.TryGetValue(sampleRate, out service!))
+                {
+                    service = new PitchDetectorService(sampleRate);
+                    _pitchServiceCache[sampleRate] = service;
+                }
+            }
+        }
+
+        var (hz, _) = service.DetectPitch(samples);
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (hz > 0)
+            {
+                int midi = HzToMidi(hz);
+
+                if (_candidateMidi == midi)
+                    _candidateMidiHits++;
+                else
+                {
+                    _candidateMidi = midi;
+                    _candidateMidiHits = 1;
+                }
+
+                if (_candidateMidiHits < MinStableDetections)
+                    return;
+
+                _lastDetectedMidi = _candidateMidi;
+
+                DetectedFrequency = $"{hz:F2} Hz";
+                DetectedNote = FormatNoteWithOctave(_lastDetectedMidi.Value);
+
+                if (_playedMidiNotes.Count == 0 || _playedMidiNotes[0] != _lastDetectedMidi.Value)
+                {
+                    _playedMidiNotes.Insert(0, _lastDetectedMidi.Value);
+                    if (_playedMidiNotes.Count > MaxPlayedNotes)
+                        _playedMidiNotes.RemoveAt(_playedMidiNotes.Count - 1);
+
+                    RefreshPlayedNotesDisplay();
+                    UpdateHarmonyAnalysis();
+                }
+            }
+            else
+            {
+                _candidateMidi = null;
+                _candidateMidiHits = 0;
+                DetectedFrequency = "— Hz";
+                DetectedNote = "—";
+            }
+        });
+    }
+
+    private static float ComputeRms(float[] samples)
+    {
+        if (samples.Length == 0)
+            return 0f;
+
+        double sum = 0;
+        for (int i = 0; i < samples.Length; i++)
+        {
+            float s = samples[i];
+            sum += s * s;
+        }
+
+        return (float)Math.Sqrt(sum / samples.Length);
+    }
+
+    private void ApplyEngineSettings()
+    {
+        _engine.Mode = SelectedMode == "Live" ? AudioMode.Live : AudioMode.TestOscillator;
+        _engine.OscillatorFrequency = (float)(OscFrequency ?? 440.0);
+        _engine.OscillatorAmplitude = (float)OscAmplitude;
+    }
+
+    private void AddLog(string message)
+    {
+        string formatted = message.StartsWith("[", StringComparison.Ordinal)
+            ? message
+            : $"[{DateTime.Now:HH:mm:ss}] {message}";
+
+        LogMessages.Insert(0, formatted);
+        while (LogMessages.Count > MaxLogMessages)
+            LogMessages.RemoveAt(LogMessages.Count - 1);
+    }
+
+    private async Task CopyLogsAsync()
+    {
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard == null)
+        {
+            AddLog("Copie impossible : presse-papiers indisponible.");
+            return;
+        }
+
+        string text = string.Join(Environment.NewLine, LogMessages);
+        await clipboard.SetValueAsync(DataFormat.Text, text);
+        AddLog("Journal copié dans le presse-papiers.");
+    }
+
+    private void RefreshSettingsLabels()
+    {
+        AudioDriverLabel = _engine.Driver switch
+        {
+            AudioDriver.WASAPI_Exclusive => "WASAPI Exclusive",
+            AudioDriver.ASIO => "ASIO",
+            _ => "WASAPI Shared"
+        };
+        SampleRateLabel = $"{_engine.SampleRate} Hz";
+        BufferSizeLabel = _engine.BufferSize.ToString();
+    }
+
+    private void RefreshDetectedNoteDisplay()
+    {
+        if (_lastDetectedMidi.HasValue)
+            DetectedNote = FormatNoteWithOctave(_lastDetectedMidi.Value);
+    }
+
+    private void RefreshPlayedNotesDisplay()
+    {
+        PlayedNotes.Clear();
+        foreach (int midi in _playedMidiNotes)
+            PlayedNotes.Add(FormatNoteWithOctave(midi));
+    }
+
+    private void UpdateHarmonyAnalysis()
+    {
+        if (_playedMidiNotes.Count == 0)
+        {
+            PossibleKey = "—";
+            PossibleChord = "—";
+            return;
+        }
+
+        var pitchClassCounts = new int[12];
+        foreach (int midi in _playedMidiNotes)
+            pitchClassCounts[PositiveModulo(midi, 12)]++;
+
+        int bestKeyRoot = 0;
+        bool bestKeyMinor = false;
+        int bestKeyScore = int.MinValue;
+
+        for (int root = 0; root < 12; root++)
+        {
+            int majorScore = ScoreScale(root, MajorScaleIntervals, pitchClassCounts);
+            if (majorScore > bestKeyScore)
+            {
+                bestKeyScore = majorScore;
+                bestKeyRoot = root;
+                bestKeyMinor = false;
+            }
+
+            int minorScore = ScoreScale(root, MinorScaleIntervals, pitchClassCounts);
+            if (minorScore > bestKeyScore)
+            {
+                bestKeyScore = minorScore;
+                bestKeyRoot = root;
+                bestKeyMinor = true;
+            }
+        }
+
+        PossibleKey = FormatHarmonyName(bestKeyRoot, bestKeyMinor);
+
+        int bestChordRoot = 0;
+        bool bestChordMinor = false;
+        int bestChordScore = int.MinValue;
+
+        for (int root = 0; root < 12; root++)
+        {
+            int majorScore = ScoreChord(root, minor: false, pitchClassCounts);
+            if (majorScore > bestChordScore)
+            {
+                bestChordScore = majorScore;
+                bestChordRoot = root;
+                bestChordMinor = false;
+            }
+
+            int minorScore = ScoreChord(root, minor: true, pitchClassCounts);
+            if (minorScore > bestChordScore)
+            {
+                bestChordScore = minorScore;
+                bestChordRoot = root;
+                bestChordMinor = true;
+            }
+        }
+
+        PossibleChord = FormatHarmonyName(bestChordRoot, bestChordMinor);
+    }
+
+    private static int ScoreScale(int root, int[] intervals, int[] counts)
+    {
+        int score = 0;
+        for (int i = 0; i < intervals.Length; i++)
+            score += counts[PositiveModulo(root + intervals[i], 12)];
+        return score;
+    }
+
+    private static int ScoreChord(int root, bool minor, int[] counts)
+    {
+        int thirdInterval = minor ? 3 : 4;
+        int score = 0;
+        score += counts[PositiveModulo(root, 12)] * 4;
+        score += counts[PositiveModulo(root + thirdInterval, 12)] * 3;
+        score += counts[PositiveModulo(root + 7, 12)] * 2;
+        return score;
+    }
+
+    private string FormatHarmonyName(int noteClass, bool minor)
+    {
+        bool compact = SelectedNotation == "Am";
+        string root = compact ? CompactNoteNames[noteClass] : FrenchNoteNames[noteClass];
+
+        if (compact)
+            return minor ? $"{root}m" : root;
+
+        string quality = minor ? "mineur" : "majeur";
+        return $"{root} {quality}";
+    }
+
+    private string FormatNoteWithOctave(int midi)
+    {
+        int noteClass = PositiveModulo(midi, 12);
+        int octave = midi / 12 - 1;
+        string noteName = SelectedNotation == "Am" ? CompactNoteNames[noteClass] : FrenchNoteNames[noteClass];
+        return $"{noteName}{octave}";
+    }
+
+    private static int HzToMidi(float hz)
+    {
+        double midi = 12.0 * Math.Log2(hz / 440.0) + 69.0;
+        return (int)Math.Round(midi);
+    }
+
+    private static int PositiveModulo(int value, int modulo)
+    {
+        int result = value % modulo;
+        return result < 0 ? result + modulo : result;
+    }
+
+    private static double ToDb(float value)
+    {
+        var safe = Math.Max(0.000001f, value);
+        return 20.0 * Math.Log10(safe);
+    }
+
+    private static double DbToMeterValue(double db)
+    {
+        var clamped = Math.Clamp(db, MinDb, 0.0);
+        return (clamped - MinDb) / -MinDb;
+    }
+
+    private static string FormatDb(double db)
+    {
+        if (db <= MinDb)
+            return "-inf dBFS";
+
+        return $"{db.ToString("F1", CultureInfo.InvariantCulture)} dBFS";
+    }
+
+    private static string GetMeterColor(double db)
+    {
+        if (db >= -6.0)
+            return "#D44141";
+        if (db >= -18.0)
+            return "#F1C43A";
+        return "#1BB155";
+    }
+
+    private bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value))
+            return false;
+
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        return true;
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        Dispose();
+        base.OnClosed(e);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _engine.OnAudioFrame -= HandleAudioFrame;
+        _engine.OnMetersUpdated -= HandleMeters;
+        _engine.OnLog -= HandleEngineLog;
+        _engine.StopAudio();
+    }
+}
+```
+
+
+### FILE: src/SmartJam/Views/MainWindow.axaml
+```xml
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="using:SmartJam.Views"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        d:DesignWidth="980"
+        d:DesignHeight="760"
+        x:Class="SmartJam.Views.MainWindow"
+        x:DataType="views:MainWindow"
+        Title="SmartJam"
+        Width="1120"
+        MinWidth="860"
+        Height="820"
+        MinHeight="640"
+        Background="#F3F6FB"
+        FontFamily="Inter,Segoe UI,sans-serif">
+
+    <Window.Styles>
+        <Style Selector="TextBlock">
+            <Setter Property="Foreground" Value="#1F2A44"/>
+        </Style>
+        <Style Selector="TextBlock.section-title">
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#5A6F98"/>
+            <Setter Property="LetterSpacing" Value="1"/>
+            <Setter Property="Margin" Value="0 0 0 10"/>
+        </Style>
+        <Style Selector="Border.panel">
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="BorderBrush" Value="#D8E1F0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style Selector="Button">
+            <Setter Property="Background" Value="#3857C6"/>
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Padding" Value="12 9"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+        <Style Selector="Button.secondary">
+            <Setter Property="Background" Value="#F6F8FD"/>
+            <Setter Property="Foreground" Value="#42557D"/>
+            <Setter Property="BorderBrush" Value="#CCD7EB"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style Selector="Button.danger">
+            <Setter Property="Background" Value="#A93745"/>
+        </Style>
+        <Style Selector="ComboBox">
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="Foreground" Value="#1F2A44"/>
+            <Setter Property="BorderBrush" Value="#CCD7EB"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="DataValidationErrors.ErrorTemplate" Value="{x:Null}"/>
+        </Style>
+        <Style Selector="NumericUpDown">
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="Foreground" Value="#1F2A44"/>
+            <Setter Property="BorderBrush" Value="#CCD7EB"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="DataValidationErrors.ErrorTemplate" Value="{x:Null}"/>
+        </Style>
+        <Style Selector="Slider">
+            <Setter Property="Foreground" Value="#6E8DFF"/>
+        </Style>
+        <Style Selector="ProgressBar">
+            <Setter Property="Height" Value="8"/>
+            <Setter Property="Background" Value="#E5EBF7"/>
+            <Setter Property="CornerRadius" Value="4"/>
+        </Style>
+        <Style Selector="ListBox">
+            <Setter Property="Background" Value="#F8FAFF"/>
+            <Setter Property="BorderBrush" Value="#D8E1F0"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style Selector="ListBoxItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        </Style>
+    </Window.Styles>
+
+    <Grid RowDefinitions="Auto,*" Margin="20">
+        <Border Grid.Row="0" Margin="0 0 0 14" Background="#FFFFFF" CornerRadius="12" Padding="16 12"
+                BorderBrush="#D8E1F0" BorderThickness="1">
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel>
+                    <TextBlock Text="SMARTJAM" FontSize="18" FontWeight="Bold" Foreground="#1F2A44"/>
+                    <TextBlock Text="Détection de note en temps réel" Foreground="#6E82A8" FontSize="12"/>
+                </StackPanel>
+                <Button Grid.Column="1" Classes="secondary" Command="{Binding OpenSettingsCommand}" Content="Audio Settings"/>
+            </Grid>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <Grid ColumnDefinitions="300,*" ColumnSpacing="14" Margin="0 0 0 8">
+                <StackPanel Grid.Column="0" Spacing="14">
+                    <Border Classes="panel">
+                        <StackPanel Spacing="10">
+                            <TextBlock Classes="section-title" Text="MONITORING"/>
+                            <TextBlock Text="Notation" Foreground="#6E82A8"/>
+                            <ComboBox ItemsSource="{Binding NotationModes}" SelectedItem="{Binding SelectedNotation}"/>
+                            <TextBlock Text="Mode" Foreground="#6E82A8"/>
+                            <ComboBox ItemsSource="{Binding Modes}" SelectedItem="{Binding SelectedMode}"/>
+                            <Button Command="{Binding ToggleMonitoringCommand}"
+                                    Content="{Binding MonitoringButtonText}"
+                                    Classes.danger="{Binding IsMonitoring}"/>
+
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10" Margin="0 4 0 0">
+                                <TextBlock Text="RMS" Foreground="#6E82A8"/>
+                                <TextBlock Grid.Column="1" Text="{Binding InputLevelDb}" Foreground="#5A6F98" FontWeight="SemiBold"/>
+                            </Grid>
+                            <ProgressBar Minimum="0" Maximum="1" Value="{Binding InputLevel}" Foreground="{Binding RmsMeterColor}"/>
+
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                <TextBlock Text="Peak" Foreground="#6E82A8"/>
+                                <TextBlock Grid.Column="1" Text="{Binding PeakLevelDb}" Foreground="#5A6F98" FontWeight="SemiBold"/>
+                            </Grid>
+                            <ProgressBar Minimum="0" Maximum="1" Value="{Binding PeakLevel}" Foreground="{Binding PeakMeterColor}"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Classes="panel" IsVisible="{Binding IsOscillatorPanelVisible}">
+                        <StackPanel Spacing="10">
+                            <TextBlock Classes="section-title" Text="OSCILLATOR"/>
+                            <TextBlock Text="Frequency (Hz)" Foreground="#6E82A8"/>
+                            <NumericUpDown x:Name="OscFrequencyInput"
+                                           Value="{Binding OscFrequency}"
+                                           Minimum="20"
+                                           Maximum="4000"
+                                           Increment="1"
+                                           FormatString="F0"/>
+                            <Border Background="#EEF3FD"
+                                    BorderBrush="#D4DFF3"
+                                    BorderThickness="1"
+                                    CornerRadius="6"
+                                    Padding="8 6"
+                                    Cursor="SizeNorthSouth"
+                                    PointerPressed="OnOscFrequencyPointerPressed"
+                                    PointerMoved="OnOscFrequencyPointerMoved"
+                                    PointerReleased="OnOscFrequencyPointerReleased"
+                                    PointerCaptureLost="OnOscFrequencyPointerCaptureLost">
+                                <TextBlock Text="Glisser haut/bas pour changer la fréquence (Shift = plus rapide)"
+                                           FontSize="11"
+                                           Foreground="#5A6F98"
+                                           TextWrapping="Wrap"/>
+                            </Border>
+                            <TextBlock Text="Amplitude" Foreground="#6E82A8"/>
+                            <Slider Minimum="0" Maximum="1" TickFrequency="0.1" Value="{Binding OscAmplitude}"/>
+                            <TextBlock Text="{Binding OscAmplitude, StringFormat={}{0:F2}}" Foreground="#5A6F98"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Top" MaxWidth="760">
+                    <Border Width="320" Height="320" CornerRadius="160" Background="#FFFFFF"
+                            BorderBrush="#C6D3EA" BorderThickness="2" Padding="20"
+                            HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6">
+                            <TextBlock Text="{Binding DetectedNote}" FontSize="84" FontWeight="Bold" Foreground="#2C3E66" HorizontalAlignment="Center"/>
+                            <TextBlock Text="{Binding DetectedFrequency}" FontSize="24" Foreground="#6B82AF" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Classes="panel" Width="420" MaxWidth="720">
+                        <StackPanel Spacing="8">
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBlock Classes="section-title" Text="NOTES JOUÉES" Margin="0"/>
+                                <Button Grid.Column="1" Classes="secondary" Content="Reset notes jouées" Command="{Binding ResetPlayedNotesCommand}"/>
+                            </Grid>
+                            <ItemsControl ItemsSource="{Binding PlayedNotes}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <WrapPanel Orientation="Horizontal"/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="#EEF3FD" BorderBrush="#D4DFF3" BorderThickness="1"
+                                                CornerRadius="6" Padding="9 5" Margin="3 3">
+                                            <TextBlock Text="{Binding}" Foreground="#3A4F77" FontWeight="SemiBold"/>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Classes="panel" Width="420" MaxWidth="720">
+                        <StackPanel Spacing="10">
+                            <TextBlock Classes="section-title" Text="ANALYSE"/>
+                            <TextBlock Text="Tonalité probable" Foreground="#6E82A8"/>
+                            <TextBlock Text="{Binding PossibleKey}" FontSize="26" FontWeight="SemiBold" Foreground="#2C3E66"/>
+
+                            <TextBlock Text="Accord probable" Foreground="#6E82A8" Margin="0 10 0 0"/>
+                            <TextBlock Text="{Binding PossibleChord}" FontSize="26" FontWeight="SemiBold" Foreground="#2C3E66"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Classes="panel" Width="520" MaxWidth="720" MinHeight="360">
+                        <StackPanel Spacing="8">
+                            <Grid ColumnDefinitions="*,Auto" Margin="0 0 0 6">
+                                <TextBlock Classes="section-title" Text="JOURNAL" Margin="0"/>
+                                <Button Grid.Column="1" Classes="secondary" Content="Copier" Command="{Binding CopyLogsCommand}"/>
+                            </Grid>
+                            <ListBox ItemsSource="{Binding LogMessages}" Height="320" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}" TextWrapping="Wrap" TextTrimming="None"/>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+
+</Window>
+
+
+```
+
+
+### FILE: src/SmartJam/SmartJam.csproj
+```xml
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.0.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.0.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.1" />
+    <PackageReference Include="AvaloniaUI.DiagnosticsSupport" Version="2.2.1">
+      <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
+      <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.1" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="NWaves" Version="0.9.6" />
+  </ItemGroup>
+</Project>
+
+```
+
+
+## 5. ARCHITECTURE & DATA FLOW SUMMARY
+
+### Real-time audio pipeline:
+```
+AudioEngine.StartAudio()
+  └─ WASAPI mode Live    → WasapiCapture → OnWasapiData() → DecodeToMono() → OnAudioFrame event
+  └─ WASAPI Oscillator   → SineWaveProvider.Read() → SamplesGenerated event → OnOscillatorSamples() → OnAudioFrame event
+  └─ ASIO mode           → AsioOut.AudioAvailable → OnAsioAudioAvailable() → ReadAsioInput() → OnAudioFrame event
+
+OnAudioFrame(float[] samples, int frames, int sampleRate)
+  └─ MainWindow.HandleAudioFrame()
+       └─ accumulate in _sampleBuffer (List<float>)
+       └─ when >= 4096 samples → Task.Run(RunPitchDetection)
+
+RunPitchDetection(float[] samples, int sampleRate)
+  └─ ComputeRms() → if < 0.008 (SilenceGateRms) → display "—"
+  └─ PitchDetectorService.DetectPitch(samples)
+       └─ NWaves Pitch.FromYin(signal, 0, len, 35f, 1200f, 0.15f) → float hz
+       └─ HzToNoteName(hz) → midi = 12*log2(hz/440)+69 → NoteNames[midi%12] + octave
+  └─ Stability filter: _candidateMidiHits must reach MinStableDetections=2
+  └─ UI update: DetectedFrequency, DetectedNote
+  └─ _playedMidiNotes (max 20) → UpdateHarmonyAnalysis()
+```
+
+### Harmony analysis (UpdateHarmonyAnalysis):
+```
+- Build pitchClassCounts[12] from _playedMidiNotes
+- Score each of 12 roots × major + minor scale → best = PossibleKey
+- Score each of 12 roots × major + minor triad (root×4, third×3, fifth×2) → best = PossibleChord
+- MajorScaleIntervals = [0,2,4,5,7,9,11]
+- MinorScaleIntervals = [0,2,3,5,7,8,10]
+```
+
+### AccompanimentGeneratorService (NOT wired to UI):
+```
+- Patterns: pop=[0,4,5,3] (I-V-vi-IV), jazz=[1,4,0,0] (ii-V-I-I), blues=[0,3,0,4] (I-IV-I-V)
+- MajorScale intervals: [0,2,4,5,7,9,11]
+- IsMajor per degree: [T,F,F,T,T,F,F]
+- KeyMidi: C=60, C#=61, D=62, ... B=71
+- Builds List<Chord> with Name + int[] MidiNotes (root, third, fifth)
+```
+
+## 6. KEY CONSTANTS & MAGIC NUMBERS
+```
+AnalysisWindowSize    = 4096    samples before pitch detection runs
+MaxPlayedNotes        = 20      notes kept in history
+MaxLogMessages        = 150     log lines kept
+SilenceGateRms        = 0.008f  below this → silence (no detection)
+MinStableDetections   = 2       consecutive identical MIDI notes before confirming
+MinDb                 = -60.0   dBFS floor for meter display
+PeakHoldDuration      = 48000   samples (~1s at 48kHz) for peak hold
+OscDragPixelsPerStep  = 2       pixels per Hz step when dragging oscillator
+OscDragStepHz         = 2.0     Hz per drag step (normal)
+OscDragStepHzFast     = 10.0    Hz per drag step (Shift held)
+OscFrequency range    = 20–4000 Hz
+YIN MinHz             = 35f
+YIN MaxHz             = 1200f
+YIN Threshold         = 0.15f
+Default SampleRate    = 44100
+Default BufferSize    = 256
+Default OscFreq       = 440 Hz
+Default OscAmplitude  = 0.6f
+EMA alpha (CPU perf)  = 0.2
+```
+
+## 7. UI LAYOUT SUMMARY (MainWindow.axaml)
+```
+Window: 1120×820px, MinWidth=860, MinHeight=640, Background=#F3F6FB
+Font: Inter/Segoe UI
+
+Header bar:
+  - Title "SMARTJAM" + subtitle
+  - Button "Audio Settings" → opens SettingsWindow (modal dialog)
+
+Main Grid (2 columns):
+  Left column (300px):
+    Panel MONITORING:
+      - ComboBox: NotationModes ["Am", "La mineur"] → SelectedNotation
+      - ComboBox: Modes ["Live", "TestOscillator"] → SelectedMode
+      - Button: "Monitoring ON/OFF" (red when active) → ToggleMonitoringCommand
+      - ProgressBar RMS + dBFS label
+      - ProgressBar Peak + dBFS label
+    Panel OSCILLATOR (visible only in TestOscillator mode):
+      - NumericUpDown: OscFrequency (20–4000, step 1)
+      - Drag zone (SizeNorthSouth cursor): drag up/down to change freq
+      - Slider: OscAmplitude (0–1)
+
+  Right column:
+    Circle display (320×320px, CornerRadius=160):
+      - DetectedNote (FontSize=84, Bold)
+      - DetectedFrequency (FontSize=24)
+    Panel NOTES JOUÉES:
+      - WrapPanel of badge-chips (blue rounded): PlayedNotes list
+      - Button "Reset notes jouées"
+    Panel ANALYSE:
+      - "Tonalité probable" + PossibleKey (FontSize=26)
+      - "Accord probable" + PossibleChord (FontSize=26)
+    Panel JOURNAL:
+      - ListBox height=320: LogMessages (newest first)
+      - Button "Copier" → copies to clipboard
+```
+
+## 8. SETTINGS WINDOW
+```
+SettingsViewModel bound to AudioEngine instance.
+Fields:
+  - SelectedAudioDriver: "WASAPI Shared" | "WASAPI Exclusive" | "ASIO"
+  - SelectedInputDevice / SelectedOutputDevice (MMDevice friendly names)
+  - SelectedAsioDriver (from AsioOut.GetDriverNames())
+  - AsioInputOffset / AsioOutputOffset (0..N-1, probed via reflection)
+  - SelectedSampleRate: 44100 | 48000 | 96000
+  - SelectedBufferSize: 64 | 128 | 256 | 512 | 1024
+Commands:
+  - Apply() → sets engine props → RebuildAudioGraph() (stop+restart)
+  - RefreshDevices() → re-enumerate WASAPI + ASIO
+  - OpenAsioControlPanel() → _asio.ShowControlPanel()
+```
+
+## 9. AUDIO ENGINE DETAILS
+
+### WASAPI Live mode:
+- WasapiCapture on selected input device
+- Supports Shared & Exclusive (fallback to Shared on E_ACCESSDENIED)
+- Decodes PCM16 and Float32 to mono float[]
+- Re-encodes to WASAPI format and feeds BufferedWaveProvider → WasapiOut (monitoring/passthrough)
+- Fires OnAudioFrame per captured buffer
+
+### WASAPI Oscillator mode:
+- SineWaveProvider (ISampleProvider) → WasapiOut
+- Aligns to device MixFormat SampleRate
+- Mono→Stereo via MonoToStereoSampleProvider if device needs it
+- SineWaveProvider fires SamplesGenerated → OnOscillatorSamples → OnAudioFrame
+
+### ASIO mode:
+- AsioOut with configurable input/output channel offset+count
+- InitRecordAndPlayback with SilenceProvider
+- Fallback to mono/stereo if init fails
+- TestOscillator: inline sine generation in OnAsioAudioAvailable callback
+- StartAsioTest(): timed test tone (duration, freq, amp) with Interlocked/Volatile
+- ProbeAsioChannels(): uses reflection to get DriverInputChannelCount / DriverOutputChannelCount
+- ReadAsioInput / WriteAsioOutput: handles Int32LSB, Int24LSB, Int16LSB, Float32LSB
+
+### Meters:
+- RMS = sqrt(sum(x²)/n)
+- Peak with hold ~1s then decay ×0.995 per frame
+- CPU overload: EMA(processingMs) > bufferMs → OnCpuOverloadChanged
+
+## 10. COMMIT HISTORY (chronological)
+```
+2026-04-29  Bootstrap: POC Pitch, POC Accompagnement, App Avalonia MVVM, docs
+2026-05-04  feat: integrate AudioEngine from AUDIOBLOCKS + full Avalonia UI
+2026-05-04  fix: no LINQ alloc in audio callback, PitchService cache, disposed guard
+2026-05-04  feat: implement SettingsView + full UI/UX redesign
+2026-05-04  fix: address code review (double Execute, empty catch, readability)
+2026-05-04  fix: implement ASIO oscillator sound, channel routing, control panel UI
+2026-05-04  fix: pitch drop on sample rate change + UI light mode redesign
+2026-05-05  fixed drag on oscillator box + added reset button for played notes (PR #8)
+2026-05-07  added: probable tone and probable chord
+2026-05-12  fixed: log not displaying some errors
+2026-05-19  updated README
+2026-05-19  cleaned code and deleted useless files (latest)
+```
+
+## 11. KNOWN LIMITATIONS / NOTES
+- AccompanimentGeneratorService is fully implemented but NOT connected to the UI
+- Only monophonic pitch detection (YIN is single-pitch)
+- ASIO channel probe uses reflection (fragile, may break on NAudio updates)
+- No unit tests present in repo
+- Windows-only (WASAPI/ASIO, app.manifest)
+- Prototype/TPI project — some planned features not implemented
